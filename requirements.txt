@@ -1,0 +1,12 @@
+aiogram
+fastapi
+uvicorn[standard]
+telethon
+gspread
+google-auth
+httpx
+beautifulsoup4
+reportlab
+python-dotenv
+# Optional: if you use competitors Playwright fallback
+# playwright

@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+*.log
+*.session
+.sessions/
+sessions/
+.env
+.env.*
+!.env.example
+config/google_service_account.json
+sources.json
+data/
+data.json
+handlers/receipts/files/
+handlers/publishing/covers/
+# OS
+.DS_Store

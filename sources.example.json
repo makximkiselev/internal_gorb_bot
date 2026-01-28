@@ -1,0 +1,13 @@
+{
+  "channels": [],
+  "chats": [],
+  "bots": [],
+  "accounts": [
+    {
+      "name": "account_name",
+      "api_id": "",
+      "api_hash": "",
+      "session": "sessions/account_name.session"
+    }
+  ]
+}
