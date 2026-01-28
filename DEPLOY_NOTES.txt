@@ -1,0 +1,35 @@
+Команды для разработки и деплоя
+
+1) Обновить код на сервере
+- что делает: git pull + рестарт бота
+- запуск:
+  ./deploy.sh
+
+2) Забрать свежие данные с сервера (логика/парсинг/пользователи)
+- что делает: rsync data/ и handlers/parsing/data/
+- запуск:
+  ./fetch-data.sh
+
+3) Отправить данные/настройки на сервер (используй только когда сам менял)
+- что делает: sources.json, data.json, .env, google_service_account.json, sessions/
+- запуск:
+  ./push-data.sh
+
+4) Управление сервисом на сервере
+- остановить:
+  systemctl stop underprice-bot
+- запустить:
+  systemctl start underprice-bot
+- перезапустить:
+  systemctl restart underprice-bot
+- статус:
+  systemctl status underprice-bot
+- логи (без pager):
+  journalctl -u underprice-bot -n 50 --no-pager
+
+5) Быстрый просмотр файлов на сервере
+- список:
+  ls -la /opt/under_price
+- открыть JSON:
+  less /opt/under_price/data.json
+  less /opt/under_price/sources.json
