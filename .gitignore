@@ -13,5 +13,8 @@ data/
 data.json
 handlers/receipts/files/
 handlers/publishing/covers/
+handlers/auto_replies/matched_queries.json
+handlers/auto_replies/spam_messages.json
+handlers/auto_replies/unmatched_queries.json
 # OS
 .DS_Store
