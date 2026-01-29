@@ -139,28 +139,12 @@ async def paid_reg_method(callback: CallbackQuery, state: FSMContext):
         session_path = PAID_SESSIONS_DIR / f"{callback.from_user.id}.session"
         client = TelegramClient(session_path, api_id, api_hash)
         await client.connect()
-        try:
-            qr = await client.qr_login()
-        except Exception as e:
-            if "PASSWORD" in str(e).upper():
-                await state.update_data(client=client)
-                await state.set_state(PaidRegistrationStates.waiting_for_qr_password)
-                await callback.message.answer("🔒 Включена двухфакторная защита. Введи пароль:", reply_markup=_cancel_kb())
-                return
-            await callback.message.answer(f"❌ Не удалось создать QR: {e}")
-            await state.clear()
-            return
-        await state.update_data(client=client, qr=qr)
-        await state.set_state(PaidRegistrationStates.waiting_for_qr_confirm)
-        img_url = _qr_image_url(qr.url)
-        await callback.message.answer_photo(
-            img_url,
-            caption=(
-                "🔳 Отсканируй QR-код в Telegram:\n"
-                "Настройки → Устройства → Сканировать QR.\n\n"
-                "После сканирования нажми «Я отсканировал»."
-            ),
-            reply_markup=_qr_kb(),
+        await state.update_data(client=client)
+        await state.set_state(PaidRegistrationStates.waiting_for_qr_password)
+        await callback.message.answer(
+            "🔒 Если включена двухфакторка — введи пароль.\n"
+            "Если пароля нет, отправь «-».",
+            reply_markup=_cancel_kb(),
         )
         return
     await callback.message.answer("Неизвестный способ. Повтори /start.")
@@ -240,9 +224,13 @@ async def paid_reg_qr_password(msg: Message, state: FSMContext):
     data = await state.get_data()
     client: TelegramClient = data["client"]
     try:
-        await client.sign_in(password=password)
+        if password and password != "-":
+            await client.sign_in(password=password)
         qr = await client.qr_login()
     except Exception as e:
+        if "PASSWORD" in str(e).upper():
+            await msg.answer("❌ Неверный пароль. Введи пароль 2FA ещё раз:", reply_markup=_cancel_kb())
+            return
         await msg.answer(f"❌ Ошибка 2FA/QR: {e}")
         await state.clear()
         return
