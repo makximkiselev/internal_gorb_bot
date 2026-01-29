@@ -27,7 +27,6 @@ class PaidRegistrationStates(StatesGroup):
     waiting_for_code = State()
     waiting_for_password = State()
     waiting_for_qr_confirm = State()
-    waiting_for_qr_password = State()
 
 
 def _cancel_kb() -> InlineKeyboardMarkup:
@@ -145,15 +144,37 @@ async def paid_reg_method(callback: CallbackQuery, state: FSMContext):
     if method == "qr":
         api_id = data["api_id"]
         api_hash = data["api_hash"]
+        tfa_password = data.get("tfa_password") or ""
         session_path = PAID_SESSIONS_DIR / f"{callback.from_user.id}.session"
         client = TelegramClient(session_path, api_id, api_hash)
         await client.connect()
-        await state.update_data(client=client)
-        await state.set_state(PaidRegistrationStates.waiting_for_qr_password)
-        await callback.message.answer(
-            "🔒 Если включена двухфакторка — введи пароль.\n"
-            "Если пароля нет, отправь «-».",
-            reply_markup=_cancel_kb(),
+        try:
+            if tfa_password:
+                await client.sign_in(password=tfa_password)
+            qr = await client.qr_login()
+        except Exception as e:
+            if "PASSWORD" in str(e).upper():
+                await callback.message.answer(
+                    "🔒 Для этого аккаунта нужен пароль 2FA.\n"
+                    "Нажми /start и введи пароль на шаге 2FA.",
+                    reply_markup=_cancel_kb(),
+                )
+                await state.clear()
+                return
+            await callback.message.answer(f"❌ Не удалось создать QR: {e}")
+            await state.clear()
+            return
+        await state.update_data(client=client, qr=qr)
+        await state.set_state(PaidRegistrationStates.waiting_for_qr_confirm)
+        img_url = _qr_image_url(qr.url)
+        await callback.message.answer_photo(
+            img_url,
+            caption=(
+                "🔳 Отсканируй QR-код в Telegram:\n"
+                "Настройки → Устройства → Сканировать QR.\n\n"
+                "После сканирования нажми «Я отсканировал»."
+            ),
+            reply_markup=_qr_kb(),
         )
         return
     await callback.message.answer("Неизвестный способ. Повтори /start.")
@@ -221,10 +242,12 @@ async def paid_reg_code(msg: Message, state: FSMContext):
                     await msg.answer(f"❌ Ошибка 2FA: {e2}")
                     await state.clear()
                     return
-            else:
-                await state.set_state(PaidRegistrationStates.waiting_for_password)
-                await msg.answer("🔒 Аккаунт защищён паролем. Введи пароль:", reply_markup=_cancel_kb())
-                return
+            await msg.answer(
+                "🔒 Нужен пароль 2FA. Нажми /start и введи пароль на шаге 2FA.",
+                reply_markup=_cancel_kb(),
+            )
+            await state.clear()
+            return
         await msg.answer(f"❌ Ошибка авторизации: {e}")
         await state.clear()
         return
@@ -248,43 +271,6 @@ async def paid_reg_password(msg: Message, state: FSMContext):
         await state.clear()
 
 
-@router.message(PaidRegistrationStates.waiting_for_qr_password)
-async def paid_reg_qr_password(msg: Message, state: FSMContext):
-    if not await _ensure_paid_user(msg, state):
-        return
-    password = msg.text or ""
-    data = await state.get_data()
-    client: TelegramClient | None = data.get("client")
-    if client is None:
-        api_id = data.get("api_id")
-        api_hash = data.get("api_hash")
-        session_path = PAID_SESSIONS_DIR / f"{msg.from_user.id}.session"
-        client = TelegramClient(session_path, api_id, api_hash)
-        await client.connect()
-        await state.update_data(client=client)
-    try:
-        if password and password != "-":
-            await client.sign_in(password=password)
-        qr = await client.qr_login()
-    except Exception as e:
-        if "PASSWORD" in str(e).upper():
-            await msg.answer("❌ Неверный пароль. Введи пароль 2FA ещё раз:", reply_markup=_cancel_kb())
-            return
-        await msg.answer(f"❌ Ошибка 2FA/QR: {e}")
-        await state.clear()
-        return
-    await state.update_data(qr=qr)
-    await state.set_state(PaidRegistrationStates.waiting_for_qr_confirm)
-    img_url = _qr_image_url(qr.url)
-    caption = (
-        "🔳 Отсканируй QR-код в Telegram:\n"
-        "Настройки → Устройства → Сканировать QR.\n\n"
-        "После сканирования нажми «Я отсканировал»."
-    )
-    try:
-        await msg.answer_photo(img_url, caption=caption, reply_markup=_qr_kb())
-    except Exception:
-        await msg.answer(f"{caption}\n\nСсылка на QR:\n{img_url}", reply_markup=_qr_kb())
 
 
 @router.callback_query(F.data == "paid_reg:qr_check")
