@@ -6,7 +6,6 @@ from aiogram.types import CallbackQuery, Message, InlineKeyboardMarkup, InlineKe
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 from telethon import TelegramClient
-from telethon.errors import PasswordHashInvalidError
 from pathlib import Path
 from urllib.parse import quote
 import asyncio
@@ -195,21 +194,6 @@ async def paid_reg_tfa_pre(msg: Message, state: FSMContext):
     password = msg.text or ""
     if password.strip() == "-":
         password = ""
-    if password:
-        data = await state.get_data()
-        api_id = data.get("api_id")
-        api_hash = data.get("api_hash")
-        session_path = PAID_SESSIONS_DIR / f"{msg.from_user.id}.session"
-        client = TelegramClient(session_path, api_id, api_hash)
-        await client.connect()
-        try:
-            await client.check_password(password=password)
-        except PasswordHashInvalidError:
-            await msg.answer("❌ Неверный пароль 2FA. Введи ещё раз:", reply_markup=_cancel_kb())
-            return
-        except Exception as e:
-            await msg.answer(f"⚠️ Не удалось проверить пароль 2FA: {e}\nПродолжим.")
-        await state.update_data(client=client)
     await state.update_data(tfa_password=password)
     await state.set_state(PaidRegistrationStates.waiting_for_method)
     await msg.answer("Выбери способ входа:", reply_markup=_method_kb())
