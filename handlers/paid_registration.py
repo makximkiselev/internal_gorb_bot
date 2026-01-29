@@ -149,21 +149,28 @@ async def paid_reg_method(callback: CallbackQuery, state: FSMContext):
         client = TelegramClient(session_path, api_id, api_hash)
         await client.connect()
         try:
-            if tfa_password:
-                await client.sign_in(password=tfa_password)
             qr = await client.qr_login()
         except Exception as e:
             if "PASSWORD" in str(e).upper():
-                await callback.message.answer(
-                    "🔒 Для этого аккаунта нужен пароль 2FA.\n"
-                    "Нажми /start и введи пароль на шаге 2FA.",
-                    reply_markup=_cancel_kb(),
-                )
+                if not tfa_password:
+                    await callback.message.answer(
+                        "🔒 Для этого аккаунта нужен пароль 2FA.\n"
+                        "Нажми /start и введи пароль на шаге 2FA.",
+                        reply_markup=_cancel_kb(),
+                    )
+                    await state.clear()
+                    return
+                try:
+                    await client.sign_in(password=tfa_password)
+                    qr = await client.qr_login()
+                except Exception as e2:
+                    await callback.message.answer(f"❌ Ошибка 2FA/QR: {e2}")
+                    await state.clear()
+                    return
+            else:
+                await callback.message.answer(f"❌ Не удалось создать QR: {e}")
                 await state.clear()
                 return
-            await callback.message.answer(f"❌ Не удалось создать QR: {e}")
-            await state.clear()
-            return
         await state.update_data(client=client, qr=qr)
         await state.set_state(PaidRegistrationStates.waiting_for_qr_confirm)
         img_url = _qr_image_url(qr.url)
