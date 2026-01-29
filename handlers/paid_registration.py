@@ -48,6 +48,7 @@ def _qr_kb() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [InlineKeyboardButton(text="✅ Я отсканировал", callback_data="paid_reg:qr_check")],
             [InlineKeyboardButton(text="🔁 Новый QR", callback_data="paid_reg:qr_new")],
+            [InlineKeyboardButton(text="🧹 Сбросить сессию", callback_data="paid_reg:reset_session")],
             [InlineKeyboardButton(text="❌ Отмена", callback_data="paid_reg:cancel")],
         ]
     )
@@ -55,6 +56,12 @@ def _qr_kb() -> InlineKeyboardMarkup:
 def _qr_image_url(url: str) -> str:
     encoded = quote(url, safe="")
     return f"https://api.qrserver.com/v1/create-qr-code/?size=320x320&data={encoded}"
+
+
+def _reset_paid_session(user_id: int) -> None:
+    session_path = PAID_SESSIONS_DIR / f"{user_id}.session"
+    if session_path.exists():
+        session_path.unlink()
 
 
 async def _ensure_paid_user(msg: Message, state: FSMContext) -> bool:
@@ -220,7 +227,7 @@ async def paid_reg_password(msg: Message, state: FSMContext):
 async def paid_reg_qr_password(msg: Message, state: FSMContext):
     if not await _ensure_paid_user(msg, state):
         return
-    password = (msg.text or "").strip()
+    password = msg.text or ""
     data = await state.get_data()
     client: TelegramClient | None = data.get("client")
     if client is None:
@@ -304,6 +311,16 @@ async def paid_reg_qr_new(callback: CallbackQuery, state: FSMContext):
         ),
         reply_markup=_qr_kb(),
     )
+
+
+@router.callback_query(F.data == "paid_reg:reset_session")
+async def paid_reg_reset_session(callback: CallbackQuery, state: FSMContext):
+    if not await _ensure_paid_user_cb(callback, state):
+        return
+    _reset_paid_session(callback.from_user.id)
+    await state.clear()
+    await callback.answer("Сессия сброшена")
+    await callback.message.answer("Сессия сброшена. Нажми /start и начни регистрацию заново.")
 
 
 async def _finish_paid_auth(msg: Message, state: FSMContext):
