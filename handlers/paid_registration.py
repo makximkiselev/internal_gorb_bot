@@ -21,8 +21,8 @@ PAID_SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
 class PaidRegistrationStates(StatesGroup):
     waiting_for_api_id = State()
     waiting_for_api_hash = State()
-    waiting_for_method = State()
     waiting_for_tfa_pre = State()
+    waiting_for_method = State()
     waiting_for_phone = State()
     waiting_for_code = State()
     waiting_for_password = State()
@@ -120,10 +120,11 @@ async def paid_reg_api_hash(msg: Message, state: FSMContext):
         await msg.answer("⚠️ API_HASH не может быть пустым. Введи ещё раз:", reply_markup=_cancel_kb())
         return
     await state.update_data(api_hash=api_hash)
-    await state.set_state(PaidRegistrationStates.waiting_for_method)
+    await state.set_state(PaidRegistrationStates.waiting_for_tfa_pre)
     await msg.answer(
-        "Выбери способ входа:",
-        reply_markup=_method_kb(),
+        "🔒 Если включена двухфакторка — введи пароль.\n"
+        "Если пароля нет, отправь «-».",
+        reply_markup=_cancel_kb(),
     )
 
 
@@ -138,12 +139,8 @@ async def paid_reg_method(callback: CallbackQuery, state: FSMContext):
     method = callback.data.split(":")[2]
     await callback.answer()
     if method == "code":
-        await state.set_state(PaidRegistrationStates.waiting_for_tfa_pre)
-        await callback.message.answer(
-            "🔒 Если включена двухфакторка — введи пароль сейчас.\n"
-            "Если пароля нет, отправь «-».",
-            reply_markup=_cancel_kb(),
-        )
+        await state.set_state(PaidRegistrationStates.waiting_for_phone)
+        await callback.message.answer("📱 Введи номер телефона (в формате +79998887766):", reply_markup=_cancel_kb())
         return
     if method == "qr":
         api_id = data["api_id"]
@@ -170,8 +167,8 @@ async def paid_reg_tfa_pre(msg: Message, state: FSMContext):
     if password.strip() == "-":
         password = ""
     await state.update_data(tfa_password=password)
-    await state.set_state(PaidRegistrationStates.waiting_for_phone)
-    await msg.answer("📱 Введи номер телефона (в формате +79998887766):", reply_markup=_cancel_kb())
+    await state.set_state(PaidRegistrationStates.waiting_for_method)
+    await msg.answer("Выбери способ входа:", reply_markup=_method_kb())
 
 
 @router.message(PaidRegistrationStates.waiting_for_phone)
