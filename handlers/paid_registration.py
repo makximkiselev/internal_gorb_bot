@@ -26,6 +26,7 @@ class PaidRegistrationStates(StatesGroup):
     waiting_for_code = State()
     waiting_for_password = State()
     waiting_for_qr_confirm = State()
+    waiting_for_qr_password = State()
 
 
 def _cancel_kb() -> InlineKeyboardMarkup:
@@ -141,6 +142,11 @@ async def paid_reg_method(callback: CallbackQuery, state: FSMContext):
         try:
             qr = await client.qr_login()
         except Exception as e:
+            if "PASSWORD" in str(e).upper():
+                await state.update_data(client=client)
+                await state.set_state(PaidRegistrationStates.waiting_for_qr_password)
+                await callback.message.answer("🔒 Включена двухфакторная защита. Введи пароль:", reply_markup=_cancel_kb())
+                return
             await callback.message.answer(f"❌ Не удалось создать QR: {e}")
             await state.clear()
             return
@@ -224,6 +230,34 @@ async def paid_reg_password(msg: Message, state: FSMContext):
     except Exception as e:
         await msg.answer(f"❌ Ошибка авторизации с паролем: {e}")
         await state.clear()
+
+
+@router.message(PaidRegistrationStates.waiting_for_qr_password)
+async def paid_reg_qr_password(msg: Message, state: FSMContext):
+    if not await _ensure_paid_user(msg, state):
+        return
+    password = (msg.text or "").strip()
+    data = await state.get_data()
+    client: TelegramClient = data["client"]
+    try:
+        await client.sign_in(password=password)
+        qr = await client.qr_login()
+    except Exception as e:
+        await msg.answer(f"❌ Ошибка 2FA/QR: {e}")
+        await state.clear()
+        return
+    await state.update_data(qr=qr)
+    await state.set_state(PaidRegistrationStates.waiting_for_qr_confirm)
+    img_url = _qr_image_url(qr.url)
+    await msg.answer_photo(
+        img_url,
+        caption=(
+            "🔳 Отсканируй QR-код в Telegram:\n"
+            "Настройки → Устройства → Сканировать QR.\n\n"
+            "После сканирования нажми «Я отсканировал»."
+        ),
+        reply_markup=_qr_kb(),
+    )
 
 
 @router.callback_query(F.data == "paid_reg:qr_check")
