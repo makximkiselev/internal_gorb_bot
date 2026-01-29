@@ -36,6 +36,19 @@ PENDING_TEXT = (
 def _auth_default() -> dict:
     return {"version": 1, "users": {}}
 
+def _default_access() -> dict:
+    return {
+        "view_prices": True,
+        "menu_products": True,
+        "menu_sales": True,
+        "menu_external": True,
+        "menu_settings": True,
+        "send_request": True,
+    }
+
+def _default_use_default_sources() -> bool:
+    return True
+
 
 async def auth_load() -> dict:
     async with AUTH_LOCK:
@@ -72,6 +85,9 @@ async def auth_upsert_user(tg_user: Any, role_if_new: str = "pending") -> dict:
             "first_name": getattr(tg_user, "first_name", None),
             "last_name": getattr(tg_user, "last_name", None),
             "role": role_if_new,  # pending/user/admin/rejected
+            "paid_account": None,
+            "access": _default_access(),
+            "use_default_sources": _default_use_default_sources(),
         }
         await auth_save(doc)
         return users[uid]
@@ -81,13 +97,74 @@ async def auth_upsert_user(tg_user: Any, role_if_new: str = "pending") -> dict:
     u["username"] = getattr(tg_user, "username", None)
     u["first_name"] = getattr(tg_user, "first_name", None)
     u["last_name"] = getattr(tg_user, "last_name", None)
+    u.setdefault("paid_account", None)
+    u.setdefault("access", _default_access())
+    u.setdefault("use_default_sources", _default_use_default_sources())
     await auth_save(doc)
     return u
 
 
+async def auth_set_paid_account(user_id: int, paid_account: dict | None) -> Optional[dict]:
+    doc = await auth_load()
+    uid = str(int(user_id))
+    users = doc.setdefault("users", {})
+    if uid not in users:
+        return None
+    users[uid]["paid_account"] = paid_account
+    await auth_save(doc)
+    return users[uid]
+
+
+async def auth_set_access(user_id: int, access: dict) -> Optional[dict]:
+    doc = await auth_load()
+    uid = str(int(user_id))
+    users = doc.setdefault("users", {})
+    if uid not in users:
+        return None
+    users[uid]["access"] = access
+    await auth_save(doc)
+    return users[uid]
+
+
+async def auth_toggle_access(user_id: int, key: str) -> Optional[dict]:
+    doc = await auth_load()
+    uid = str(int(user_id))
+    users = doc.setdefault("users", {})
+    if uid not in users:
+        return None
+    access = users[uid].setdefault("access", _default_access())
+    access[key] = not bool(access.get(key))
+    await auth_save(doc)
+    return users[uid]
+
+
+async def auth_set_use_default_sources(user_id: int, value: bool) -> Optional[dict]:
+    doc = await auth_load()
+    uid = str(int(user_id))
+    users = doc.setdefault("users", {})
+    if uid not in users:
+        return None
+    users[uid]["use_default_sources"] = bool(value)
+    await auth_save(doc)
+    return users[uid]
+
+
 async def auth_get(user_id: int) -> Optional[dict]:
     doc = await auth_load()
-    return doc.get("users", {}).get(str(int(user_id)))
+    uid = str(int(user_id))
+    u = doc.get("users", {}).get(uid)
+    if not u:
+        return None
+    changed = False
+    if "access" not in u:
+        u["access"] = _default_access()
+        changed = True
+    if "use_default_sources" not in u:
+        u["use_default_sources"] = _default_use_default_sources()
+        changed = True
+    if changed:
+        await auth_save(doc)
+    return u
 
 
 async def auth_set_role(user_id: int, role: str) -> Optional[dict]:

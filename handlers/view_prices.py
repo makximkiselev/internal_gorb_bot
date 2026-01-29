@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from aiogram import Router, F
+from handlers.auth_utils import auth_get
 from aiogram.filters import Command
 from aiogram.types import (
     CallbackQuery,
@@ -418,6 +419,10 @@ def _render_branch_text(path: List[str]) -> str:
 # ---------------------------------------------------------------------
 @router.message(Command("prices"))
 async def cmd_prices(message: Message):
+    u = await auth_get(message.from_user.id)
+    if not u or not (u.get("role") == "admin" or (u.get("access") or {}).get("view_prices")):
+        await message.answer("⛔️ Нет доступа")
+        return
     data = _ensure_parsed_data()
     root = _get_catalog_root(data)
     children = list(root.keys())  # order as in JSON
@@ -426,6 +431,10 @@ async def cmd_prices(message: Message):
 
 @router.callback_query(F.data == "view_prices")
 async def cb_open_prices(callback: CallbackQuery):
+    u = await auth_get(callback.from_user.id)
+    if not u or not (u.get("role") == "admin" or (u.get("access") or {}).get("view_prices")):
+        await callback.answer("⛔️ Нет доступа", show_alert=True)
+        return
     data = _ensure_parsed_data()
     root = _get_catalog_root(data)
     children = list(root.keys())

@@ -21,6 +21,7 @@ from aiogram.types import (
 from aiogram.filters import CommandStart
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
+from aiogram.fsm.context import FSMContext
 
 # === Импорты проекта ===
 from handlers.parsing import parser
@@ -31,7 +32,7 @@ from handlers.catalog.crud import categories as cat_crud
 from handlers.catalog.crud import brands as brand_crud
 from handlers.catalog.crud import series as series_crud
 from handlers.catalog.crud import models as model_crud
-from handlers import accounts, sources, monitoring, view_prices, chat_request
+from handlers import accounts, sources, monitoring, view_prices, chat_request, paid_registration
 from handlers.auto_replies import ui as auto_replies
 from handlers.auto_replies.listener import register_auto_replies
 from handlers.publishing import channel_manager_ui
@@ -58,6 +59,9 @@ from handlers.auth_utils import (
     auth_get,
     auth_set_role,
     auth_list_by_role,
+    auth_set_access,
+    auth_toggle_access,
+    auth_set_use_default_sources,
     display_user,
     is_admin,
 )
@@ -203,14 +207,34 @@ def run_bot():
         dp = Dispatcher()
 
         # === Главное меню (роль-зависимое) ===
-        def main_menu(role: str):
+        def _access_allowed(u: dict | None, key: str) -> bool:
+            if not u:
+                return False
+            if u.get("role") == "admin":
+                return True
+            access = u.get("access") or {}
+            return bool(access.get(key, False))
+
+        def _main_menu_user(u: dict):
+            role = u.get("role", "pending")
             # 👤 Обычный пользователь: только "Посмотреть цены"
             if role != "admin":
-                return InlineKeyboardMarkup(
-                    inline_keyboard=[
-                        [InlineKeyboardButton(text="👁 Посмотреть цены", callback_data="view_prices")],
-                    ]
-                )
+                rows = []
+                if _access_allowed(u, "view_prices"):
+                    rows.append([InlineKeyboardButton(text="👁 Посмотреть цены", callback_data="view_prices")])
+                if _access_allowed(u, "send_request"):
+                    rows.append([InlineKeyboardButton(text="📨 Отправить запрос", callback_data="send_request")])
+                if _access_allowed(u, "menu_products"):
+                    rows.append([InlineKeyboardButton(text="🧾 Товары и цены", callback_data="menu:products")])
+                if _access_allowed(u, "menu_sales"):
+                    rows.append([InlineKeyboardButton(text="💰 Продажи", callback_data="menu:sales")])
+                if _access_allowed(u, "menu_external"):
+                    rows.append([InlineKeyboardButton(text="📊 Внешние таблицы", callback_data="menu:external")])
+                if _access_allowed(u, "menu_settings"):
+                    rows.append([InlineKeyboardButton(text="⚙️ Настройки", callback_data="menu:settings")])
+                if not rows:
+                    rows = [[InlineKeyboardButton(text="👁 Посмотреть цены", callback_data="view_prices")]]
+                return InlineKeyboardMarkup(inline_keyboard=rows)
 
             # 🛡 Админ: новое главное меню (структурированное)
             kb = [
@@ -221,6 +245,22 @@ def run_bot():
                 [InlineKeyboardButton(text="⚙️ Настройки", callback_data="menu:settings")],
             ]
             return InlineKeyboardMarkup(inline_keyboard=kb)
+
+        def role_label(role: str) -> str:
+            if role == "admin":
+                return "🛡 Администратор"
+            if role == "paid_user":
+                return "💼 Клиент"
+            return "👤 Пользователь"
+
+        ACCESS_OPTIONS = [
+            ("view_prices", "👁 Посмотреть цены"),
+            ("menu_products", "🧾 Товары и цены"),
+            ("menu_sales", "💰 Продажи"),
+            ("menu_external", "📊 Внешние таблицы"),
+            ("menu_settings", "⚙️ Настройки"),
+            ("send_request", "📨 Отправить запрос"),
+        ]
 
         def products_menu_kb():
             return InlineKeyboardMarkup(
@@ -263,7 +303,7 @@ def run_bot():
 
         # === /start (авторизация) ===
         @dp.message(CommandStart())
-        async def start(msg: Message):
+        async def start(msg: Message, state: FSMContext):
             if msg.from_user:
                 remember_user(msg.from_user)
 
@@ -279,7 +319,13 @@ def run_bot():
                     await msg.answer(PENDING_TEXT)
                     return
 
-                await msg.answer("Привет 👋\nВыбери действие:", reply_markup=main_menu(role))
+                if role == "paid_user":
+                    paid = u.get("paid_account") or {}
+                    if paid.get("status") != "ready":
+                        await paid_registration.start_paid_registration(msg, state)
+                        return
+
+                await msg.answer("Привет 👋\nВыбери действие:", reply_markup=_main_menu_user(u))
                 return
 
             await msg.answer(PENDING_TEXT)
@@ -298,7 +344,10 @@ def run_bot():
                 await callback.message.answer(PENDING_TEXT)
                 return
 
-            await callback.message.answer("Главное меню:", reply_markup=main_menu(role))
+            if not u:
+                await callback.message.answer(PENDING_TEXT)
+                return
+            await callback.message.answer("Главное меню:", reply_markup=_main_menu_user(u))
 
         @dp.callback_query(F.data == "menu:products")
         async def open_products_menu(callback: CallbackQuery):
@@ -309,6 +358,9 @@ def run_bot():
             role = (u or {}).get("role", "pending")
             if role in ("pending", "rejected"):
                 await callback.message.answer(PENDING_TEXT)
+                return
+            if not _access_allowed(u, "menu_products"):
+                await callback.answer("⛔️ Нет доступа", show_alert=True)
                 return
             await callback.message.answer("Товары и цены:", reply_markup=products_menu_kb())
 
@@ -322,6 +374,9 @@ def run_bot():
             if role in ("pending", "rejected"):
                 await callback.message.answer(PENDING_TEXT)
                 return
+            if not _access_allowed(u, "menu_sales"):
+                await callback.answer("⛔️ Нет доступа", show_alert=True)
+                return
             await callback.message.answer("Продажи:", reply_markup=sales_menu_kb())
 
         @dp.callback_query(F.data == "menu:external")
@@ -334,6 +389,9 @@ def run_bot():
             if role in ("pending", "rejected"):
                 await callback.message.answer(PENDING_TEXT)
                 return
+            if not _access_allowed(u, "menu_external"):
+                await callback.answer("⛔️ Нет доступа", show_alert=True)
+                return
             await callback.message.answer("Внешние таблицы:", reply_markup=external_tables_menu_kb())
 
         @dp.callback_query(F.data == "menu:settings")
@@ -345,6 +403,9 @@ def run_bot():
             role = (u or {}).get("role", "pending")
             if role in ("pending", "rejected"):
                 await callback.message.answer(PENDING_TEXT)
+                return
+            if not _access_allowed(u, "menu_settings"):
+                await callback.answer("⛔️ Нет доступа", show_alert=True)
                 return
             await callback.message.answer("Настройки:", reply_markup=settings_menu_kb())
 
@@ -413,7 +474,7 @@ def run_bot():
 
         def kb_request_card(u: dict):
             role = u.get("role", "pending")
-            role_txt = "🛡 Администратор" if role == "admin" else "👤 Пользователь"
+            role_txt = role_label(role)
             return InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text=f"🔁 Роль: {role_txt}", callback_data=f"auth:toggle_req:{u['id']}")],
                 [InlineKeyboardButton(text="✅ Одобрить", callback_data=f"auth:approve:{u['id']}")],
@@ -460,7 +521,14 @@ def run_bot():
                 return
 
             cur = u.get("role", "pending")
-            new = "user" if cur == "pending" else ("admin" if cur == "user" else "user")
+            if cur == "pending":
+                new = "user"
+            elif cur == "user":
+                new = "admin"
+            elif cur == "admin":
+                new = "paid_user"
+            else:
+                new = "user"
             await auth_set_role(user_id, new)
 
             u2 = await auth_get(user_id)
@@ -487,6 +555,20 @@ def run_bot():
                 await auth_set_role(user_id, "user")
 
             await callback.answer("✅ Одобрено")
+            u2 = await auth_get(user_id)
+            if u2:
+                role = u2.get("role", "user")
+                if role == "paid_user":
+                    text = (
+                        "✅ Ваша заявка одобрена.\n"
+                        "Пожалуйста, пройдите регистрацию: нажмите /start и следуйте инструкциям."
+                    )
+                else:
+                    text = "✅ Ваша заявка одобрена. Нажмите /start."
+                try:
+                    await callback.message.bot.send_message(user_id, text)
+                except Exception:
+                    pass
             pending = await auth_list_by_role("pending")
             await callback.message.answer("📥 Запросы на доступ:", reply_markup=kb_requests_list(pending))
 
@@ -498,6 +580,13 @@ def run_bot():
             user_id = int(callback.data.split(":")[2])
             await auth_set_role(user_id, "rejected")
             await callback.answer("❌ Отклонено")
+            try:
+                await callback.message.bot.send_message(
+                    user_id,
+                    "❌ Ваша заявка отклонена. По вопросам пишите администратору.",
+                )
+            except Exception:
+                pass
             pending = await auth_list_by_role("pending")
             await callback.message.answer("📥 Запросы на доступ:", reply_markup=kb_requests_list(pending))
 
@@ -507,6 +596,7 @@ def run_bot():
             return InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="🛡 Администраторы", callback_data="auth:list:admin")],
                 [InlineKeyboardButton(text="👤 Пользователи", callback_data="auth:list:user")],
+                [InlineKeyboardButton(text="💼 Клиенты", callback_data="auth:list:paid_user")],
                 [InlineKeyboardButton(text="⬅️ Назад", callback_data="auth:menu")],
             ])
 
@@ -530,10 +620,15 @@ def run_bot():
                 if draft and draft.get("target_id") == target["id"]
                 else target.get("role", "user")
             )
-            role_txt = "🛡 Администратор" if new_role == "admin" else "👤 Пользователь"
+            role_txt = role_label(new_role)
             back_role = target.get("role", "user")
+            use_default_sources = target.get("use_default_sources", True)
+            sources_label = "✅ По умолчанию" if use_default_sources else "❌ Только свои"
             return InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text=f"🔁 Роль: {role_txt}", callback_data=f"auth:toggle_edit:{target['id']}")],
+                [InlineKeyboardButton(text="🔐 Доступы", callback_data=f"auth:access:{target['id']}")],
+                [InlineKeyboardButton(text=f"🧩 Источники: {sources_label}", callback_data=f"auth:sources_cfg:{target['id']}")],
+                [InlineKeyboardButton(text="🚫 Убрать доступ", callback_data=f"auth:remove_access:{target['id']}")],
                 [InlineKeyboardButton(text="💾 Сохранить", callback_data=f"auth:save:{target['id']}")],
                 [InlineKeyboardButton(text="❌ Отменить", callback_data=f"auth:cancel:{target['id']}")],
                 [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"auth:list:{back_role}")],
@@ -600,10 +695,143 @@ def run_bot():
                 }
                 d = AUTH_DRAFTS[callback.from_user.id]
 
-            d["new_role"] = "admin" if d["new_role"] == "user" else "user"
+            if d["new_role"] == "user":
+                d["new_role"] = "admin"
+            elif d["new_role"] == "admin":
+                d["new_role"] = "paid_user"
+            else:
+                d["new_role"] = "user"
 
             await callback.answer("Роль изменена (черновик)")
             await callback.message.edit_reply_markup(reply_markup=kb_active_edit(callback.from_user.id, target))
+
+        def kb_access_edit(target: dict):
+            access = target.get("access") or {}
+            rows = []
+            for key, label in ACCESS_OPTIONS:
+                enabled = bool(access.get(key))
+                mark = "✅" if enabled else "❌"
+                rows.append([InlineKeyboardButton(
+                    text=f"{mark} {label}",
+                    callback_data=f"auth:access_toggle:{target['id']}:{key}",
+                )])
+            rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"auth:edit:{target['id']}")])
+            return InlineKeyboardMarkup(inline_keyboard=rows)
+
+        @dp.callback_query(F.data.startswith("auth:access:"))
+        async def auth_access_open(callback: CallbackQuery):
+            if not await is_admin(callback.from_user.id):
+                await callback.answer("⛔️ Только для админов", show_alert=True)
+                return
+            target_id = int(callback.data.split(":")[2])
+            target = await auth_get(target_id)
+            if not target:
+                await callback.answer("Не найден", show_alert=True)
+                return
+            await callback.answer()
+            await callback.message.answer(
+                f"🔐 Доступы для {display_user(target)}",
+                reply_markup=kb_access_edit(target),
+            )
+
+        @dp.callback_query(F.data.startswith("auth:access_toggle:"))
+        async def auth_access_toggle(callback: CallbackQuery):
+            if not await is_admin(callback.from_user.id):
+                await callback.answer("⛔️ Только для админов", show_alert=True)
+                return
+            parts = callback.data.split(":")
+            if len(parts) < 4:
+                await callback.answer("Неверные данные", show_alert=True)
+                return
+            target_id = int(parts[2])
+            key = parts[3]
+            target = await auth_get(target_id)
+            if not target:
+                await callback.answer("Не найден", show_alert=True)
+                return
+            valid_keys = {k for k, _ in ACCESS_OPTIONS}
+            if key not in valid_keys:
+                await callback.answer("Неизвестный доступ", show_alert=True)
+                return
+            await auth_toggle_access(target_id, key)
+            target = await auth_get(target_id)
+            await callback.answer("Обновлено")
+            await callback.message.edit_reply_markup(reply_markup=kb_access_edit(target))
+
+        def kb_sources_cfg(target: dict):
+            use_default = bool(target.get("use_default_sources", True))
+            rows = [
+                [InlineKeyboardButton(
+                    text=f"{'✅' if use_default else '❌'} Использовать данные по умолчанию",
+                    callback_data=f"auth:sources_set:{target['id']}:1",
+                )],
+                [InlineKeyboardButton(
+                    text=f"{'✅' if not use_default else '❌'} Не использовать данные по умолчанию",
+                    callback_data=f"auth:sources_set:{target['id']}:0",
+                )],
+                [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"auth:edit:{target['id']}")],
+            ]
+            return InlineKeyboardMarkup(inline_keyboard=rows)
+
+        @dp.callback_query(F.data.startswith("auth:sources_cfg:"))
+        async def auth_sources_cfg(callback: CallbackQuery):
+            if not await is_admin(callback.from_user.id):
+                await callback.answer("⛔️ Только для админов", show_alert=True)
+                return
+            target_id = int(callback.data.split(":")[2])
+            target = await auth_get(target_id)
+            if not target:
+                await callback.answer("Не найден", show_alert=True)
+                return
+            await callback.answer()
+            await callback.message.answer(
+                f"🧩 Источники для {display_user(target)}",
+                reply_markup=kb_sources_cfg(target),
+            )
+
+        @dp.callback_query(F.data.startswith("auth:sources_set:"))
+        async def auth_sources_set(callback: CallbackQuery):
+            if not await is_admin(callback.from_user.id):
+                await callback.answer("⛔️ Только для админов", show_alert=True)
+                return
+            parts = callback.data.split(":")
+            if len(parts) < 4:
+                await callback.answer("Неверные данные", show_alert=True)
+                return
+            target_id = int(parts[2])
+            value = parts[3] == "1"
+            target = await auth_get(target_id)
+            if not target:
+                await callback.answer("Не найден", show_alert=True)
+                return
+            await auth_set_use_default_sources(target_id, value)
+            target = await auth_get(target_id)
+            await callback.answer("Обновлено")
+            await callback.message.edit_reply_markup(reply_markup=kb_sources_cfg(target))
+
+        @dp.callback_query(F.data.startswith("auth:remove_access:"))
+        async def auth_remove_access(callback: CallbackQuery):
+            if not await is_admin(callback.from_user.id):
+                await callback.answer("⛔️ Только для админов", show_alert=True)
+                return
+            target_id = int(callback.data.split(":")[2])
+            target = await auth_get(target_id)
+            if not target:
+                await callback.answer("Не найден", show_alert=True)
+                return
+            if target.get("role") == "admin":
+                await callback.answer("Нельзя убрать доступ у администратора", show_alert=True)
+                return
+            await auth_set_role(target_id, "pending")
+            await callback.answer("Доступ убран")
+            try:
+                await callback.message.bot.send_message(
+                    target_id,
+                    "⛔️ Ваш доступ отозван. Статус изменён на ожидание подтверждения.",
+                )
+            except Exception:
+                pass
+            await callback.message.answer("✅ Доступ убран, статус: pending", reply_markup=kb_active_root())
 
         @dp.callback_query(F.data.startswith("auth:save:"))
         async def auth_save_edit(callback: CallbackQuery):
@@ -653,6 +881,7 @@ def run_bot():
         dp.include_router(results.router)
         dp.include_router(catalog_menu.router)
         dp.include_router(accounts.router)
+        dp.include_router(paid_registration.router)
         dp.include_router(sources.router)
         dp.include_router(monitoring.router)
         dp.include_router(parser.router)

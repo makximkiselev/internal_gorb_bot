@@ -2,6 +2,7 @@ import re
 import json
 from pathlib import Path
 from aiogram import Router, F
+from handlers.auth_utils import auth_get
 from aiogram.types import CallbackQuery, Message, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
@@ -75,6 +76,10 @@ def _is_bot(dialog) -> bool:
 # === Главное меню ===
 @router.callback_query(F.data == "sources")
 async def show_sources_menu(callback: CallbackQuery, state: FSMContext):
+    u = await auth_get(callback.from_user.id)
+    if not u or not (u.get("role") == "admin" or (u.get("access") or {}).get("menu_settings")):
+        await callback.answer("⛔️ Нет доступа", show_alert=True)
+        return
     await state.clear()
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="➕ Добавить канал", callback_data="add_channel")],

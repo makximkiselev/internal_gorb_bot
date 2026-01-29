@@ -5,6 +5,7 @@ from aiogram.types import CallbackQuery, Message, InlineKeyboardMarkup, InlineKe
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 from telethon_manager import get_all_clients
+from handlers.auth_utils import auth_get
 from pathlib import Path
 import json
 
@@ -54,6 +55,10 @@ def request_menu_kb():
 # === Старт ввода текста ===
 @router.callback_query(F.data == "send_request")
 async def send_request_start(callback: CallbackQuery, state: FSMContext):
+    u = await auth_get(callback.from_user.id)
+    if not u or not (u.get("role") == "admin" or (u.get("access") or {}).get("send_request")):
+        await callback.answer("⛔️ Нет доступа", show_alert=True)
+        return
     await state.set_state(ChatRequestStates.waiting_for_text)
     kb = InlineKeyboardMarkup(
         inline_keyboard=[[InlineKeyboardButton(text="⬅️ Отмена", callback_data="cancel_request")]]
