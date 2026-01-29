@@ -22,6 +22,7 @@ class PaidRegistrationStates(StatesGroup):
     waiting_for_api_id = State()
     waiting_for_api_hash = State()
     waiting_for_method = State()
+    waiting_for_tfa_pre = State()
     waiting_for_phone = State()
     waiting_for_code = State()
     waiting_for_password = State()
@@ -137,8 +138,12 @@ async def paid_reg_method(callback: CallbackQuery, state: FSMContext):
     method = callback.data.split(":")[2]
     await callback.answer()
     if method == "code":
-        await state.set_state(PaidRegistrationStates.waiting_for_phone)
-        await callback.message.answer("📱 Введи номер телефона (в формате +79998887766):", reply_markup=_cancel_kb())
+        await state.set_state(PaidRegistrationStates.waiting_for_tfa_pre)
+        await callback.message.answer(
+            "🔒 Если включена двухфакторка — введи пароль сейчас.\n"
+            "Если пароля нет, отправь «-».",
+            reply_markup=_cancel_kb(),
+        )
         return
     if method == "qr":
         api_id = data["api_id"]
@@ -155,6 +160,18 @@ async def paid_reg_method(callback: CallbackQuery, state: FSMContext):
         )
         return
     await callback.message.answer("Неизвестный способ. Повтори /start.")
+
+
+@router.message(PaidRegistrationStates.waiting_for_tfa_pre)
+async def paid_reg_tfa_pre(msg: Message, state: FSMContext):
+    if not await _ensure_paid_user(msg, state):
+        return
+    password = msg.text or ""
+    if password.strip() == "-":
+        password = ""
+    await state.update_data(tfa_password=password)
+    await state.set_state(PaidRegistrationStates.waiting_for_phone)
+    await msg.answer("📱 Введи номер телефона (в формате +79998887766):", reply_markup=_cancel_kb())
 
 
 @router.message(PaidRegistrationStates.waiting_for_phone)
@@ -197,9 +214,20 @@ async def paid_reg_code(msg: Message, state: FSMContext):
         await client.sign_in(phone=phone, code=code)
     except Exception as e:
         if "PASSWORD" in str(e).upper():
-            await state.set_state(PaidRegistrationStates.waiting_for_password)
-            await msg.answer("🔒 Аккаунт защищён паролем. Введи пароль:", reply_markup=_cancel_kb())
-            return
+            tfa_password = data.get("tfa_password")
+            if tfa_password:
+                try:
+                    await client.sign_in(password=tfa_password)
+                    await _finish_paid_auth(msg, state)
+                    return
+                except Exception as e2:
+                    await msg.answer(f"❌ Ошибка 2FA: {e2}")
+                    await state.clear()
+                    return
+            else:
+                await state.set_state(PaidRegistrationStates.waiting_for_password)
+                await msg.answer("🔒 Аккаунт защищён паролем. Введи пароль:", reply_markup=_cancel_kb())
+                return
         await msg.answer(f"❌ Ошибка авторизации: {e}")
         await state.clear()
         return
