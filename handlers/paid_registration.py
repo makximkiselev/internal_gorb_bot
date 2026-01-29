@@ -222,7 +222,14 @@ async def paid_reg_qr_password(msg: Message, state: FSMContext):
         return
     password = (msg.text or "").strip()
     data = await state.get_data()
-    client: TelegramClient = data["client"]
+    client: TelegramClient | None = data.get("client")
+    if client is None:
+        api_id = data.get("api_id")
+        api_hash = data.get("api_hash")
+        session_path = PAID_SESSIONS_DIR / f"{msg.from_user.id}.session"
+        client = TelegramClient(session_path, api_id, api_hash)
+        await client.connect()
+        await state.update_data(client=client)
     try:
         if password and password != "-":
             await client.sign_in(password=password)
@@ -237,15 +244,15 @@ async def paid_reg_qr_password(msg: Message, state: FSMContext):
     await state.update_data(qr=qr)
     await state.set_state(PaidRegistrationStates.waiting_for_qr_confirm)
     img_url = _qr_image_url(qr.url)
-    await msg.answer_photo(
-        img_url,
-        caption=(
-            "🔳 Отсканируй QR-код в Telegram:\n"
-            "Настройки → Устройства → Сканировать QR.\n\n"
-            "После сканирования нажми «Я отсканировал»."
-        ),
-        reply_markup=_qr_kb(),
+    caption = (
+        "🔳 Отсканируй QR-код в Telegram:\n"
+        "Настройки → Устройства → Сканировать QR.\n\n"
+        "После сканирования нажми «Я отсканировал»."
     )
+    try:
+        await msg.answer_photo(img_url, caption=caption, reply_markup=_qr_kb())
+    except Exception:
+        await msg.answer(f"{caption}\n\nСсылка на QR:\n{img_url}", reply_markup=_qr_kb())
 
 
 @router.callback_query(F.data == "paid_reg:qr_check")
