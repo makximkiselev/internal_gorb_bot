@@ -297,25 +297,36 @@ async def paid_reg_qr_check(callback: CallbackQuery, state: FSMContext):
         client = TelegramClient(session_path, api_id, api_hash)
         await client.connect()
         await state.update_data(client=client)
+    print(f"🔎 QR check start: user_id={callback.from_user.id}")
     await callback.answer("Проверяю вход...")
     try:
+        print("🔎 QR wait...")
         await asyncio.wait_for(qr.wait(), timeout=60)
+        print("✅ QR wait completed")
     except asyncio.TimeoutError:
+        print("⏳ QR wait timeout")
         await callback.message.answer("⏳ Вход ещё не подтверждён. Отсканируй QR и нажми ещё раз.")
         return
     except Exception as e:
+        print(f"❌ QR wait error: {e}")
         await callback.message.answer(f"❌ Ошибка QR-входа: {e}")
         await state.clear()
         return
     try:
-        if not await client.is_user_authorized():
+        authorized = await client.is_user_authorized()
+        print(f"🔎 is_user_authorized={authorized}")
+        if not authorized:
             tfa_password = data.get("tfa_password") or ""
+            print(f"🔎 tfa_password_present={bool(tfa_password)}")
             if tfa_password:
                 await client.sign_in(password=tfa_password)
+                print("✅ sign_in(password) ok")
     except Exception as e:
+        print(f"❌ QR finalize error: {e}")
         await callback.message.answer(f"❌ Ошибка подтверждения входа: {e}")
         await state.clear()
         return
+    print("✅ QR login finalized")
     await _finish_paid_auth(callback.message, state)
 
 
