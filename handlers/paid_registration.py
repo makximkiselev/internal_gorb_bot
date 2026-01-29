@@ -119,6 +119,29 @@ async def paid_reg_api_hash(msg: Message, state: FSMContext):
         await msg.answer("⚠️ API_HASH не может быть пустым. Введи ещё раз:", reply_markup=_cancel_kb())
         return
     await state.update_data(api_hash=api_hash)
+    # если сессия уже есть и авторизована — завершаем без кода/QR
+    session_path = PAID_SESSIONS_DIR / f"{msg.from_user.id}.session"
+    if session_path.exists():
+        data = await state.get_data()
+        api_id = data.get("api_id")
+        try:
+            client = TelegramClient(session_path, api_id, api_hash)
+            await client.connect()
+            if await client.is_user_authorized():
+                paid_account = {
+                    "name": f"paid_{msg.from_user.id}",
+                    "api_id": api_id,
+                    "api_hash": api_hash,
+                    "phone": None,
+                    "session": f"sessions/paid/{msg.from_user.id}.session",
+                    "status": "ready",
+                }
+                await auth_set_paid_account(msg.from_user.id, paid_account)
+                await msg.answer("✅ Сессия уже авторизована. Вход завершён. Нажми /start.")
+                await state.clear()
+                return
+        except Exception:
+            pass
     await state.set_state(PaidRegistrationStates.waiting_for_tfa_pre)
     await msg.answer(
         "🔒 Если включена двухфакторка — введи пароль.\n"
