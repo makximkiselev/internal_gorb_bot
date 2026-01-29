@@ -289,6 +289,14 @@ async def paid_reg_qr_check(callback: CallbackQuery, state: FSMContext):
     if not qr:
         await callback.answer("QR не найден, создай новый", show_alert=True)
         return
+    client: TelegramClient | None = data.get("client")
+    if client is None:
+        api_id = data.get("api_id")
+        api_hash = data.get("api_hash")
+        session_path = PAID_SESSIONS_DIR / f"{callback.from_user.id}.session"
+        client = TelegramClient(session_path, api_id, api_hash)
+        await client.connect()
+        await state.update_data(client=client)
     await callback.answer("Проверяю вход...")
     try:
         await asyncio.wait_for(qr.wait(), timeout=60)
@@ -297,6 +305,15 @@ async def paid_reg_qr_check(callback: CallbackQuery, state: FSMContext):
         return
     except Exception as e:
         await callback.message.answer(f"❌ Ошибка QR-входа: {e}")
+        await state.clear()
+        return
+    try:
+        if not await client.is_user_authorized():
+            tfa_password = data.get("tfa_password") or ""
+            if tfa_password:
+                await client.sign_in(password=tfa_password)
+    except Exception as e:
+        await callback.message.answer(f"❌ Ошибка подтверждения входа: {e}")
         await state.clear()
         return
     await _finish_paid_auth(callback.message, state)
