@@ -4,7 +4,7 @@ from aiogram import Router, F
 from aiogram.types import CallbackQuery, Message, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
-from telethon_manager import get_all_clients
+from telethon_manager import get_all_clients, get_clients_for_user
 from handlers.auth_utils import auth_get
 from pathlib import Path
 import json
@@ -26,6 +26,18 @@ def load_sources() -> dict:
         return json.loads(SOURCES_FILE.read_text(encoding="utf-8"))
     except Exception:
         return {"accounts": [], "channels": [], "chats": [], "bots": []}
+
+
+def _filter_sources_by_user(db: dict, user_id: int | None, is_admin: bool) -> dict:
+    def _ok(item: dict) -> bool:
+        uid = item.get("user_id")
+        if is_admin:
+            return uid is None
+        return uid == user_id
+
+    return {
+        "chats": [s for s in db.get("chats", []) if isinstance(s, dict) and _ok(s)],
+    }
 
 
 # --- helpers ---
@@ -86,14 +98,20 @@ async def process_request_text(msg: Message, state: FSMContext):
 
     # --- Источники ---
     sources = load_sources()
+    u = await auth_get(msg.from_user.id)
+    is_admin = u.get("role") == "admin" if u else False
+    sources = _filter_sources_by_user(sources, msg.from_user.id, is_admin)
     chat_sources = sources.get("chats", []) or []
     if not chat_sources:
-        await msg.answer("⚠️ Нет доступных чатов в списке источников.", reply_markup=request_menu_kb())
+        await msg.answer("⚠️ Нет доступных чатов в списке источников. Добавь чат для рассылки.", reply_markup=request_menu_kb())
         await state.clear()
         return
 
     # --- Клиенты (из telethon_manager; там ключи и алиасы уже нормализованы) ---
-    clients = get_all_clients()
+    if is_admin:
+        clients = get_all_clients()
+    else:
+        clients = await get_clients_for_user(msg.from_user.id, include_default=False)
 
     total_sent = 0
     total_failed = 0

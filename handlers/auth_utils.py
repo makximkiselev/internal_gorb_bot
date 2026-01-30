@@ -42,7 +42,6 @@ def _default_access() -> dict:
         "main.send_request": True,
         "products.catalog": True,
         "products.collect": True,
-        "products.view_prices": True,
         "sales.receipt": True,
         "external.update_gsheet": True,
         "external.competitors": True,
@@ -72,7 +71,6 @@ def _normalize_access(access: dict | None) -> dict:
     if access.get("menu_products") or access.get("main.products"):
         access.setdefault("products.catalog", True)
         access.setdefault("products.collect", True)
-        access.setdefault("products.view_prices", True)
     if access.get("menu_sales") or access.get("main.sales"):
         access.setdefault("sales.receipt", True)
     if access.get("menu_external") or access.get("main.external"):

@@ -227,7 +227,7 @@ def run_bot():
                     rows.append([InlineKeyboardButton(text="👁 Посмотреть цены", callback_data="view_prices")])
                 if _access_allowed(u, "main.send_request"):
                     rows.append([InlineKeyboardButton(text="📨 Отправить запрос", callback_data="send_request")])
-                if _any_access(u, ["products.catalog", "products.collect", "products.view_prices"]):
+                if _any_access(u, ["products.catalog", "products.collect"]):
                     rows.append([InlineKeyboardButton(text="🧾 Товары и цены", callback_data="menu:products")])
                 if _access_allowed(u, "sales.receipt"):
                     rows.append([InlineKeyboardButton(text="💰 Продажи", callback_data="menu:sales")])
@@ -267,7 +267,6 @@ def run_bot():
             ("Товары и цены", [
                 ("products.catalog", "🛠 Каталог"),
                 ("products.collect", "🏷 Собрать цены"),
-                ("products.view_prices", "👁 Посмотреть цены"),
             ]),
             ("Продажи", [
                 ("sales.receipt", "🧾 Товарный чек"),
@@ -291,8 +290,6 @@ def run_bot():
                 rows.append([InlineKeyboardButton(text="🛠 Каталог", callback_data="catalog_menu")])
             if _access_allowed(u, "products.collect"):
                 rows.append([InlineKeyboardButton(text="🏷 Собрать цены", callback_data="collect")])
-            if _access_allowed(u, "products.view_prices"):
-                rows.append([InlineKeyboardButton(text="👁 Посмотреть цены", callback_data="view_prices")])
             rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")])
             return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -387,7 +384,7 @@ def run_bot():
             if role in ("pending", "rejected"):
                 await callback.message.answer(PENDING_TEXT)
                 return
-            if not _any_access(u, ["products.catalog", "products.collect", "products.view_prices"]):
+            if not _any_access(u, ["products.catalog", "products.collect"]):
                 await callback.answer("⛔️ Нет доступа", show_alert=True)
                 return
             await callback.message.answer("Товары и цены:", reply_markup=products_menu_kb(u))

@@ -430,7 +430,7 @@ def _render_branch_text(path: List[str]) -> str:
 async def cmd_prices(message: Message):
     u = await auth_get(message.from_user.id)
     access = (u or {}).get("access") or {}
-    if not u or not (u.get("role") == "admin" or access.get("main.view_prices") or access.get("products.view_prices")):
+    if not u or not (u.get("role") == "admin" or access.get("main.view_prices")):
         await message.answer("⛔️ Нет доступа")
         return
     data = _ensure_parsed_data(_parsed_data_path_for_user(u))
@@ -443,7 +443,7 @@ async def cmd_prices(message: Message):
 async def cb_open_prices(callback: CallbackQuery):
     u = await auth_get(callback.from_user.id)
     access = (u or {}).get("access") or {}
-    if not u or not (u.get("role") == "admin" or access.get("main.view_prices") or access.get("products.view_prices")):
+    if not u or not (u.get("role") == "admin" or access.get("main.view_prices")):
         await callback.answer("⛔️ Нет доступа", show_alert=True)
         return
     data = _ensure_parsed_data(_parsed_data_path_for_user(u))

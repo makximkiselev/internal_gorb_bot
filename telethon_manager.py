@@ -336,8 +336,16 @@ async def get_clients_for_user(user_id: int, include_default: bool = True) -> di
         out.update(get_all_clients())
     paid_client = await get_paid_client(user_id)
     if paid_client:
-        key = f"paid_{user_id}"
-        out[key] = paid_client
+        uname_key = ""
+        try:
+            me = await paid_client.get_me()
+            uname_key = _strip_at(getattr(me, "username", None) or "")
+        except Exception:
+            uname_key = ""
+        if uname_key:
+            out[uname_key] = paid_client
+            out.setdefault(f"@{uname_key}", paid_client)
+        out[f"paid_{user_id}"] = paid_client
     return out
 
 async def reload_clients(register_listeners: bool = True) -> dict[str, TelegramClient]:

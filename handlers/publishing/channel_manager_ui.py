@@ -135,6 +135,43 @@ def _save_registry(reg: dict) -> None:
     save_data(db)
 
 
+def _is_owner(ch: dict, user_id: int | None) -> bool:
+    try:
+        return int(ch.get("user_id")) == int(user_id)
+    except Exception:
+        return False
+
+
+def _filter_registry_for_user(reg: dict, user_id: int | None, is_admin: bool) -> dict:
+    if is_admin:
+        return reg
+    return {k: v for k, v in reg.items() if isinstance(v, dict) and _is_owner(v, user_id)}
+
+
+async def _require_cm_access(cb: CallbackQuery) -> Optional[dict]:
+    u = await auth_get(cb.from_user.id)
+    access = (u or {}).get("access") or {}
+    if not u or not (u.get("role") == "admin" or access.get("settings.cm")):
+        await cb.answer("⛔️ Нет доступа", show_alert=True)
+        return None
+    return u
+
+
+async def _get_channel_for_cb(cb: CallbackQuery, ch_id: str) -> tuple[Optional[dict], Optional[dict], Optional[dict]]:
+    u = await _require_cm_access(cb)
+    if not u:
+        return None, None, None
+    reg = _get_registry()
+    ch = reg.get(ch_id)
+    if not ch:
+        await cb.answer("Канал не найден", show_alert=True)
+        return u, reg, None
+    if u.get("role") != "admin" and not _is_owner(ch, cb.from_user.id):
+        await cb.answer("⛔️ Нет доступа", show_alert=True)
+        return u, reg, None
+    return u, reg, ch
+
+
 def _purge_channel_data(peer_id: str) -> None:
     db = load_data()
     db.get("managed_channels", {}).pop(peer_id, None)
@@ -387,10 +424,8 @@ async def _resolve_channel_via_telethon(raw: str):
 
 @router.callback_query(F.data == "cm:add_start")
 async def cm_add_start(cb: CallbackQuery, state: FSMContext):
-    u = await auth_get(cb.from_user.id)
-    access = (u or {}).get("access") or {}
-    if not u or not (u.get("role") == "admin" or access.get("settings.cm")):
-        await cb.answer("⛔️ Нет доступа", show_alert=True)
+    u = await _require_cm_access(cb)
+    if not u:
         return
     await state.set_state(AddChannelStates.waiting_for_input)
     await cb.message.edit_text(
@@ -405,7 +440,10 @@ async def cm_add_start(cb: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "cm:add_cancel")
 async def cm_add_cancel(cb: CallbackQuery, state: FSMContext):
     await state.clear()
-    reg = _get_registry()
+    u = await _require_cm_access(cb)
+    if not u:
+        return
+    reg = _filter_registry_for_user(_get_registry(), cb.from_user.id, u.get("role") == "admin")
     await cb.message.edit_text(
         "Отменено.",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=_kb_main(reg)),
@@ -419,7 +457,14 @@ async def cm_add_handle_input(msg: Message, state: FSMContext):
         peer_id, info = await _resolve_channel_via_telethon(text)
         reg = _get_registry()
         existed = reg.get(peer_id, {})
+        u = await auth_get(msg.from_user.id)
+        is_admin = (u or {}).get("role") == "admin"
+        if not is_admin and existed and not _is_owner(existed, msg.from_user.id):
+            await msg.answer("⛔️ Этот канал уже закреплён за другим пользователем.")
+            return
         existed.update(info)
+        if not is_admin:
+            existed["user_id"] = msg.from_user.id
         reg[peer_id] = existed
         _save_registry(reg)
 
@@ -442,12 +487,11 @@ async def cm_add_handle_input(msg: Message, state: FSMContext):
 # ---------- aiogram handlers ----------
 @router.callback_query(F.data == "cm:open")
 async def cm_open(cb: CallbackQuery):
-    u = await auth_get(cb.from_user.id)
-    access = (u or {}).get("access") or {}
-    if not u or not (u.get("role") == "admin" or access.get("settings.cm")):
-        await cb.answer("⛔️ Нет доступа", show_alert=True)
+    u = await _require_cm_access(cb)
+    if not u:
         return
     reg = _get_registry()
+    reg = _filter_registry_for_user(reg, cb.from_user.id, u.get("role") == "admin")
     await cb.message.edit_text(
         "📣 Управление каналами:\nВыберите канал для действий.",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=_kb_main(reg)),
@@ -461,16 +505,9 @@ async def cm_close(cb: CallbackQuery):
 
 @router.callback_query(F.data.startswith("cm:view:"))
 async def cm_view(cb: CallbackQuery):
-    u = await auth_get(cb.from_user.id)
-    access = (u or {}).get("access") or {}
-    if not u or not (u.get("role") == "admin" or access.get("settings.cm")):
-        await cb.answer("⛔️ Нет доступа", show_alert=True)
-        return
     ch_id = cb.data.split(":")[-1]
-    reg = _get_registry()
-    ch = reg.get(ch_id)
+    _u, _reg, ch = await _get_channel_for_cb(cb, ch_id)
     if not ch:
-        await cb.answer("Канал не найден", show_alert=True)
         return
 
     cfg = _load_publish_config()
@@ -494,10 +531,8 @@ async def cm_view(cb: CallbackQuery):
 @router.callback_query(F.data.startswith("cm:toggle:"))
 async def cm_toggle_type(cb: CallbackQuery):
     ch_id = cb.data.split(":")[-1]
-    reg = _get_registry()
-    ch = reg.get(ch_id)
+    _u, reg, ch = await _get_channel_for_cb(cb, ch_id)
     if not ch:
-        await cb.answer("Канал не найден", show_alert=True)
         return
     ch["type"] = "retail" if ch.get("type") == "opt" else "opt"
     _save_registry(reg)
@@ -507,10 +542,8 @@ async def cm_toggle_type(cb: CallbackQuery):
 @router.callback_query(F.data.startswith("cm:toggle_ann:"))
 async def cm_toggle_ann(cb: CallbackQuery):
     ch_id = cb.data.split(":")[-1]
-    reg = _get_registry()
-    ch = reg.get(ch_id)
+    _u, reg, ch = await _get_channel_for_cb(cb, ch_id)
     if not ch:
-        await cb.answer("Канал не найден", show_alert=True)
         return
     ch["daily_announce"] = not ch.get("daily_announce", True)
     _save_registry(reg)
@@ -520,6 +553,9 @@ async def cm_toggle_ann(cb: CallbackQuery):
 @router.callback_query(F.data.startswith("cm:del:"))
 async def cm_delete(cb: CallbackQuery):
     ch_id = cb.data.split(":")[-1]
+    _u, _reg, ch = await _get_channel_for_cb(cb, ch_id)
+    if not ch:
+        return
 
     _purge_channel_data(ch_id)
 
@@ -550,7 +586,11 @@ async def cm_delete(cb: CallbackQuery):
 
     await cb.message.edit_text(
         "Канал удалён из управления.",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=_kb_main(_get_registry())),
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=_kb_main(
+                _filter_registry_for_user(_get_registry(), cb.from_user.id, (_u or {}).get("role") == "admin")
+            )
+        ),
     )
 
 
@@ -686,9 +726,9 @@ async def _render_publish_tree_for_channel(
     *,
     edit: bool = True,
 ):
-    db = load_data()
-    reg = db.get("managed_channels", {})
-    ch = reg.get(ch_id) or {}
+    _u, _reg, ch = await _get_channel_for_cb(callback, ch_id)
+    if not ch:
+        return
     title = ch.get("title") or ch.get("username") or ch_id
 
     tree = _get_catalog_tree_for_publish()
@@ -797,9 +837,9 @@ async def _render_images_tree_for_channel(
     *,
     edit: bool = True,
 ):
-    db = load_data()
-    reg = db.get("managed_channels", {})
-    ch = reg.get(ch_id) or {}
+    _u, _reg, ch = await _get_channel_for_cb(callback, ch_id)
+    if not ch:
+        return
     title = ch.get("title") or ch.get("username") or ch_id
 
     if (ch.get("type") or "opt") == "opt":
@@ -878,6 +918,10 @@ async def cm_publish_toggle(cb: CallbackQuery):
         ch_id, tok = tail.split(":", 1)
     except ValueError:
         await cb.answer("Ошибка пути", show_alert=True)
+        return
+
+    _u, _reg, ch = await _get_channel_for_cb(cb, ch_id)
+    if not ch:
         return
 
     raw_path = _resolve_path_token(tok, kind="pub", ch_id=ch_id)
@@ -998,6 +1042,10 @@ async def cm_img_del(cb: CallbackQuery):
         await cb.answer("Ошибка", show_alert=True)
         return
 
+    _u, _reg, ch = await _get_channel_for_cb(cb, ch_id)
+    if not ch:
+        return
+
     raw_path = _resolve_path_token(tok, kind="img", ch_id=ch_id)
     if raw_path is None:
         await _alert_stale(cb)
@@ -1019,6 +1067,10 @@ async def cm_img_set(cb: CallbackQuery, state: FSMContext):
         await cb.answer("Ошибка", show_alert=True)
         return
 
+    _u, _reg, ch = await _get_channel_for_cb(cb, ch_id)
+    if not ch:
+        return
+
     raw_path = _resolve_path_token(tok, kind="img", ch_id=ch_id)
     if raw_path is None:
         await _alert_stale(cb)
@@ -1026,8 +1078,6 @@ async def cm_img_set(cb: CallbackQuery, state: FSMContext):
 
     path = [p for p in raw_path.split("|") if p]
 
-    db = load_data()
-    ch = (db.get("managed_channels", {}) or {}).get(ch_id) or {}
     if (ch.get("type") or "opt") == "opt":
         await cb.answer("Только для розничных каналов", show_alert=True)
         return
@@ -1082,6 +1132,22 @@ async def cm_img_receive_photo(msg: Message, state: FSMContext):
         await state.clear()
         await msg.answer("Ошибка: не найден канал. Откройте меню снова.")
         return
+    u = await auth_get(msg.from_user.id)
+    access = (u or {}).get("access") or {}
+    if not u or not (u.get("role") == "admin" or access.get("settings.cm")):
+        await state.clear()
+        await msg.answer("⛔️ Нет доступа")
+        return
+    reg = _get_registry()
+    ch = reg.get(str(ch_id)) or reg.get(ch_id)
+    if not ch:
+        await state.clear()
+        await msg.answer("Канал не найден. Откройте меню снова.")
+        return
+    if u.get("role") != "admin" and not _is_owner(ch, msg.from_user.id):
+        await state.clear()
+        await msg.answer("⛔️ Нет доступа")
+        return
 
     if not msg.photo:
         await msg.answer("Пришлите именно фото (не файл).")
@@ -1124,6 +1190,7 @@ async def cm_img_receive_photo(msg: Message, state: FSMContext):
     cb_like = type("Obj", (), {})()
     cb_like.message = msg
     cb_like.answer = (lambda *args, **kwargs: asyncio.sleep(0))
+    cb_like.from_user = msg.from_user
     await _render_images_tree_for_channel(cb_like, ch_id=str(ch_id), current_path=target_path, edit=False)
 
 
@@ -1161,9 +1228,9 @@ def _store_channel_final_message(ch_id: str, text: str, username: Optional[str] 
 async def cm_final_start(cb: CallbackQuery, state: FSMContext):
     ch_id = cb.data.split(":")[-1]
 
-    db = load_data()
-    reg = db.get("managed_channels", {})
-    ch = reg.get(ch_id) or {}
+    _u, _reg, ch = await _get_channel_for_cb(cb, ch_id)
+    if not ch:
+        return
     title = ch.get("title") or ch.get("username") or ch_id
 
     current_text = _load_channel_final_message(ch_id)
@@ -1199,13 +1266,26 @@ async def cm_final_save(msg: Message, state: FSMContext):
         await state.clear()
         await msg.answer("Канал не найден. Попробуйте ещё раз через меню каналов.")
         return
+    u = await auth_get(msg.from_user.id)
+    access = (u or {}).get("access") or {}
+    if not u or not (u.get("role") == "admin" or access.get("settings.cm")):
+        await state.clear()
+        await msg.answer("⛔️ Нет доступа")
+        return
+    reg = _get_registry()
+    ch = reg.get(str(ch_id)) or reg.get(ch_id)
+    if not ch:
+        await state.clear()
+        await msg.answer("Канал не найден. Попробуйте ещё раз через меню каналов.")
+        return
+    if u.get("role") != "admin" and not _is_owner(ch, msg.from_user.id):
+        await state.clear()
+        await msg.answer("⛔️ Нет доступа")
+        return
 
     new_text_raw = (msg.text or "").strip()
     new_text = "" if new_text_raw == "-" else new_text_raw
 
-    db = load_data()
-    reg = db.setdefault("managed_channels", {})
-    ch = reg.get(ch_id) or {}
     title = ch.get("title") or ch.get("username") or ch_id
     username = (ch.get("username") or "").strip() or None
 
@@ -1244,10 +1324,8 @@ def _make_channel_ref(ch_id: str, ch: dict) -> str | int:
 @router.callback_query(F.data.startswith("cm:update:"))
 async def cm_update_one(cb: CallbackQuery):
     ch_id = cb.data.split(":")[-1]
-    reg = _get_registry()
-    ch = reg.get(ch_id)
+    _u, _reg, ch = await _get_channel_for_cb(cb, ch_id)
     if not ch:
-        await cb.answer("Канал не найден", show_alert=True)
         return
 
     mode = "opt" if ch.get("type") == "opt" else "retail"
@@ -1284,10 +1362,8 @@ async def cm_update_one(cb: CallbackQuery):
 @router.callback_query(F.data.startswith("cm:hide:"))
 async def cm_hide_one(cb: CallbackQuery):
     ch_id = cb.data.split(":")[-1]
-    reg = _get_registry()
-    ch = reg.get(ch_id)
+    _u, _reg, ch = await _get_channel_for_cb(cb, ch_id)
     if not ch:
-        await cb.answer("Канал не найден", show_alert=True)
         return
 
     if ch.get("type") != "opt":
@@ -1314,7 +1390,11 @@ async def cm_hide_one(cb: CallbackQuery):
 # --- Обновление всех каналов ---
 @router.callback_query(F.data == "cm:update_all")
 async def cm_update_all(cb: CallbackQuery):
+    u = await _require_cm_access(cb)
+    if not u:
+        return
     reg = _get_registry()
+    reg = _filter_registry_for_user(reg, cb.from_user.id, u.get("role") == "admin")
     total_created = total_edited = total_skipped = total_removed = 0
     total_channels = 0
 
@@ -1345,7 +1425,8 @@ async def cm_update_all(cb: CallbackQuery):
         f"Удалено: {total_removed}"
     )
     try:
-        await cb.message.edit_text(msg, reply_markup=InlineKeyboardMarkup(inline_keyboard=_kb_main(_get_registry())))
+        updated_reg = _filter_registry_for_user(_get_registry(), cb.from_user.id, u.get("role") == "admin")
+        await cb.message.edit_text(msg, reply_markup=InlineKeyboardMarkup(inline_keyboard=_kb_main(updated_reg)))
     except TelegramBadRequest as e:
         if "message is not modified" in str(e).lower():
             pass

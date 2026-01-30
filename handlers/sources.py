@@ -158,6 +158,7 @@ async def _search_dialogs(query: str, src_type: str, *, user_id: int | None = No
 
     found = []
 
+    seen_clients = set()
     for acc_name, client in clients.items():
         norm_acc = _norm(acc_name)
 
@@ -165,6 +166,11 @@ async def _search_dialogs(query: str, src_type: str, *, user_id: int | None = No
         if sources_accounts_norm and norm_acc not in sources_accounts_norm:
             print(f"⛔ Пропущен аккаунт {acc_name} (norm='{norm_acc}') — нет в sources_accounts_norm")
             continue
+        if user_id is not None:
+            cid = id(client)
+            if cid in seen_clients:
+                continue
+            seen_clients.add(cid)
 
         print(f"🔎 Ищу в аккаунте: {acc_name} (norm='{norm_acc}')")
 
@@ -203,10 +209,12 @@ def _build_selection_keyboard(found, src_type: str, selected: set[int]):
         eid = int(d.entity.id)
         icon = {"channel": "📺", "chat": "💬", "bot": "🤖"}[src_type]
         mark = "✅" if eid in selected else "☑️"
-        title = d.name or ('@' + (getattr(d.entity, "username", "") or "без имени"))
+        uname = getattr(d.entity, "username", "") or ""
+        title = d.name or ("@" + uname if uname else "без имени")
+        suffix = f" (@{uname})" if uname else ""
         rows.append([
             InlineKeyboardButton(
-                text=f"{mark} {icon} {acc} — {title[:50]}",
+                text=f"{mark} {icon} {acc} — {title[:45]}{suffix[:15]}",
                 callback_data=f"toggle_select:{src_type}:{acc}:{eid}"
             )
         ])
@@ -231,7 +239,15 @@ async def _handle_search_results(msg: Message, state: FSMContext, src_type: str,
     await state.update_data(
         query=query,
         type=src_type,
-        found=[(acc, int(d.entity.id), d.name or ('@' + (getattr(d.entity, 'username', '') or 'без имени'))) for acc, d in found],
+        found=[
+            (
+                acc,
+                int(d.entity.id),
+                d.name or ("@" + (getattr(d.entity, "username", "") or "без имени")),
+                getattr(d.entity, "username", "") or "",
+            )
+            for acc, d in found
+        ],
         selected=[]
     )
 
@@ -258,7 +274,16 @@ async def toggle_select(callback: CallbackQuery, state: FSMContext):
 
     # Восстанавливаем объекты найденных
     from types import SimpleNamespace
-    found_objs = [(acc_, SimpleNamespace(entity=SimpleNamespace(id=fid), name=name)) for acc_, fid, name in found]
+    found_objs = [
+        (
+            acc_,
+            SimpleNamespace(
+                entity=SimpleNamespace(id=fid, username=uname),
+                name=name,
+            ),
+        )
+        for acc_, fid, name, uname in found
+    ]
     kb = _build_selection_keyboard(found_objs, src_type, selected)
     await callback.message.edit_reply_markup(reply_markup=kb)
 
@@ -279,11 +304,13 @@ async def save_selected(callback: CallbackQuery, state: FSMContext):
 
     db = load_sources()
     count = 0
-    for acc, eid, name in found:
+    for acc, eid, name, uname in found:
         if eid in selected:
             entry = {"name": name, "channel_id": int(eid), "account": acc}
             if not is_admin:
                 entry["user_id"] = callback.from_user.id
+            if uname:
+                entry["display_name"] = f"@{uname}"
             # для ботов тоже пишем в "bots"
             db[src_type + "s"].append(entry)
             count += 1
@@ -342,19 +369,29 @@ async def list_sources(callback: CallbackQuery):
     ctx = await _get_user_ctx(callback.from_user.id)
     is_admin = ctx.get("role") == "admin"
     db = _filter_sources_by_user(db, callback.from_user.id, is_admin)
+    show_account = is_admin
     text = "📡 <b>Источники</b>\n\n"
     if db["channels"]:
         text += "📺 <b>Каналы:</b>\n"
         for i, s in enumerate(db["channels"], 1):
-            text += f"{i}. {s['name']} (аккаунт: {s['account']})\n"
+            disp = s.get("display_name") or ""
+            disp_txt = f" {disp}" if disp else ""
+            acc_txt = f" (аккаунт: {s['account']})" if show_account else ""
+            text += f"{i}. {s['name']}{disp_txt}{acc_txt}\n"
     if db["chats"]:
         text += "\n💬 <b>Чаты:</b>\n"
         for i, s in enumerate(db["chats"], 1):
-            text += f"{i}. {s['name']} (аккаунт: {s['account']})\n"
+            disp = s.get("display_name") or ""
+            disp_txt = f" {disp}" if disp else ""
+            acc_txt = f" (аккаунт: {s['account']})" if show_account else ""
+            text += f"{i}. {s['name']}{disp_txt}{acc_txt}\n"
     if db["bots"]:
         text += "\n🤖 <b>Боты:</b>\n"
         for i, s in enumerate(db["bots"], 1):
-            text += f"{i}. {s['name']} (аккаунт: {s['account']})\n"
+            disp = s.get("display_name") or ""
+            disp_txt = f" {disp}" if disp else ""
+            acc_txt = f" (аккаунт: {s['account']})" if show_account else ""
+            text += f"{i}. {s['name']}{disp_txt}{acc_txt}\n"
 
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="sources")]])
     await callback.message.answer(text or "⚠️ Источников нет.", reply_markup=kb)
