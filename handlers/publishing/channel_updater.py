@@ -2434,13 +2434,8 @@ async def hide_opt_models(
     if not isinstance(existing, dict) or not existing:
         return 0
 
-    msgs = await client.get_messages(entity, limit=2000)
-    actual_ids = {str(m.id) for m in msgs if isinstance(m, Message)}
-
     updated = 0
     for mid, meta in list(existing.items()):
-        if mid not in actual_ids:
-            continue
         if not isinstance(meta, dict):
             continue
 
