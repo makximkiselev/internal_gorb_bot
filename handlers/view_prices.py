@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 from collections import OrderedDict
+import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -110,6 +111,106 @@ def _parsed_data_path_for_user(u: dict | None) -> Path:
         return user_data_dir(u["id"]) / "parsed_data.json"
     return DEFAULT_BASE_DIR / "parsed_data.json"
 
+
+def _sync_user_parsed_copy(base_path: Path, user_path: Path) -> None:
+    try:
+        if not base_path.exists():
+            return
+        if not user_path.exists() or base_path.stat().st_mtime > user_path.stat().st_mtime:
+            user_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(base_path, user_path)
+    except Exception:
+        return
+
+
+def _read_matched_items(path: Path) -> list[dict]:
+    try:
+        if not path.exists():
+            return []
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    if isinstance(raw, dict):
+        items = raw.get("items") or []
+        return [x for x in items if isinstance(x, dict)]
+    if isinstance(raw, list):
+        return [x for x in raw if isinstance(x, dict)]
+    return []
+
+
+def _ensure_custom_merge(u: dict) -> Path | None:
+    try:
+        from handlers.parsing.context import set_parsing_data_dir, user_data_dir, DEFAULT_BASE_DIR
+        from handlers.parsing import results as results_mod
+    except Exception:
+        return None
+
+    user_dir = user_data_dir(u["id"])
+    user_parsed = user_dir / "parsed_data.json"
+    user_matched = user_dir / "parsed_matched.json"
+    base_matched = DEFAULT_BASE_DIR / "parsed_matched.json"
+
+    if not base_matched.exists():
+        return user_parsed if user_parsed.exists() else None
+
+    need_merge = False
+    if not user_parsed.exists():
+        need_merge = True
+    else:
+        try:
+            user_parsed_m = user_parsed.stat().st_mtime
+            if base_matched.stat().st_mtime > user_parsed_m:
+                need_merge = True
+            if user_matched.exists() and user_matched.stat().st_mtime > user_parsed_m:
+                need_merge = True
+        except Exception:
+            need_merge = True
+
+    if not need_merge:
+        return user_parsed
+
+    merged_items = _read_matched_items(base_matched) + _read_matched_items(user_matched)
+    try:
+        user_dir.mkdir(parents=True, exist_ok=True)
+        user_matched.write_text(
+            json.dumps({"items": merged_items, "items_count": len(merged_items)}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except Exception:
+        return user_parsed if user_parsed.exists() else None
+
+    try:
+        set_parsing_data_dir(user_dir)
+        results_mod.rebuild_parsed_data_all()
+    except Exception:
+        pass
+    finally:
+        try:
+            set_parsing_data_dir(DEFAULT_BASE_DIR)
+        except Exception:
+            pass
+
+    return user_parsed if user_parsed.exists() else None
+
+
+def _get_data_for_user(u: dict | None) -> Dict[str, Any]:
+    if not u or u.get("role") == "admin":
+        return _ensure_parsed_data(DEFAULT_BASE_DIR / "parsed_data.json")
+    if u.get("role") == "paid_user":
+        mode = u.get("sources_mode", "default")
+        base_path = DEFAULT_BASE_DIR / "parsed_data.json"
+        user_path = user_data_dir(u["id"]) / "parsed_data.json"
+        if mode == "default":
+            _sync_user_parsed_copy(base_path, user_path)
+            return _ensure_parsed_data(base_path)
+        if mode == "custom":
+            merged_path = _ensure_custom_merge(u)
+            if merged_path:
+                return _ensure_parsed_data(merged_path)
+            return _ensure_parsed_data(base_path)
+        # own
+        return _ensure_parsed_data(user_path)
+    return _ensure_parsed_data(DEFAULT_BASE_DIR / "parsed_data.json")
 
 def _get_catalog_root(data: Dict[str, Any]) -> Dict[str, Any]:
     cat = data.get("catalog")
@@ -451,8 +552,8 @@ async def cmd_prices(message: Message):
     if not u or not (u.get("role") == "admin" or access.get("main.view_prices")):
         await message.answer("⛔️ Нет доступа")
         return
-    data = _ensure_parsed_data(_parsed_data_path_for_user(u))
-    if (u or {}).get("role") == "paid_user" and (u or {}).get("sources_mode") in ("own", "custom"):
+    data = _get_data_for_user(u)
+    if (u or {}).get("role") == "paid_user" and (u or {}).get("sources_mode") == "own":
         if not _has_any_price(data.get("catalog")):
             await message.answer("⚠️ Цены пустые. Добавь источники и запусти «Собрать цены».")
     root = _get_catalog_root(data)
@@ -467,8 +568,8 @@ async def cb_open_prices(callback: CallbackQuery):
     if not u or not (u.get("role") == "admin" or access.get("main.view_prices")):
         await callback.answer("⛔️ Нет доступа", show_alert=True)
         return
-    data = _ensure_parsed_data(_parsed_data_path_for_user(u))
-    if (u or {}).get("role") == "paid_user" and (u or {}).get("sources_mode") in ("own", "custom"):
+    data = _get_data_for_user(u)
+    if (u or {}).get("role") == "paid_user" and (u or {}).get("sources_mode") == "own":
         if not _has_any_price(data.get("catalog")):
             await callback.message.answer("⚠️ Цены пустые. Добавь источники и запусти «Собрать цены».")
     root = _get_catalog_root(data)
