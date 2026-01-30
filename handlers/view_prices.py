@@ -99,7 +99,7 @@ def _ensure_parsed_data(path: Path) -> Dict[str, Any]:
     """
     data = _read_json(path, None)
     if not isinstance(data, dict) or not isinstance(data.get("catalog"), dict):
-        return {"catalog": OrderedDict(), "timestamp": "", "stats": {}}
+        return {"catalog": _load_etalon_tree(), "timestamp": "", "stats": {}}
     return data
 
 
@@ -138,6 +138,8 @@ def _is_variant_value(v: Any) -> bool:
 
 
 def _is_model_leaf(node: Any) -> bool:
+    if isinstance(node, list):
+        return True
     if not isinstance(node, dict):
         return False
     if not node:
@@ -252,6 +254,16 @@ def _collect_leaf_lines_for_model(path_to_model: List[str], variants: Dict[str, 
     Иначе — как в parsed_data.json (порядок ключей dict).
     """
     out: List[str] = []
+    if isinstance(variants, list):
+        for x in variants:
+            title = "" if x is None else str(x)
+            if title == "":
+                out.append("")
+            else:
+                out.append(_render_variant_line(title, {}))
+        return out
+    if not isinstance(variants, dict):
+        return ["—"]
     et_list = _get_etalon_variant_list_for_model(path_to_model)
 
     if et_list:
