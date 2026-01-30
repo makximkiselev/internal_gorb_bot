@@ -19,6 +19,13 @@ from aiogram import Bot as AiogramBot
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from storage import load_data, save_data
+from handlers.publishing.storage import (
+    load_channel_posts,
+    save_channel_posts,
+    load_channel_menu_state,
+    save_channel_menu_state,
+    load_status_extra,
+)
 
 
 # ====================== Настройки темпа публикаций (мягкий rate-limit) ======================
@@ -1884,12 +1891,7 @@ async def _delete_all_status_messages(client, entity, *, existing_index: dict[st
 
 
 def _load_status_extra_for_channel(peer_id: str, username: Optional[str]) -> str:
-    try:
-        db = load_data()
-    except Exception:
-        return ""
-
-    cfg = db.get("channel_status_extra") or {}
+    cfg = load_status_extra() or {}
     if not isinstance(cfg, dict):
         return ""
 
@@ -2015,8 +2017,8 @@ async def sync_channel(
             desired_models.add(m)
 
     # ====== кеш ======
-    channel_posts = _ensure_dict(db, "channel_posts", {})
-    menu_state_all = _ensure_dict(db, "channel_menu_state", {})
+    channel_posts = load_channel_posts(peer_id)
+    menu_state_all = load_channel_menu_state(peer_id)
 
     # pricing cfg: ТОЛЬКО из parsed_data.json
     pricing_cfg = _load_channel_pricing_config_from_parsed(parsed)
@@ -2030,17 +2032,17 @@ async def sync_channel(
     def _url(mid: int | str) -> str:
         return f"https://t.me/{username}/{mid}" if username else f"https://t.me/c/{peer_id_short}/{mid}"
 
-    menu_state = menu_state_all.setdefault(peer_id, {
+    menu_state = menu_state_all if isinstance(menu_state_all, dict) and menu_state_all else {
         "brand_models": {},  # key "cat|br" -> mid
         "brands": {},        # cat -> mid
         "categories": None,  # global menu mid
         "status": None,      # status mid
-    })
+    }
 
     # ====== существующие сообщения ======
     msgs = await client.get_messages(entity, limit=RECENT_MESSAGES_LIMIT)
 
-    existing = channel_posts.setdefault(peer_id, {})
+    existing = channel_posts if isinstance(channel_posts, dict) else {}
     actual_ids = {str(m.id) for m in msgs if isinstance(m, Message)}
 
     removed = await _prune_missing_messages(client, entity, existing_index=existing, recent_ids=actual_ids)
@@ -2390,9 +2392,8 @@ async def sync_channel(
     )
 
     # ====== save ======
-    db["channel_posts"][peer_id] = existing
-    db["channel_menu_state"][peer_id] = menu_state
-    save_data(db)
+    save_channel_posts(peer_id, existing)
+    save_channel_menu_state(peer_id, menu_state)
 
     _log(f"DONE: created={created}, edited={edited}, skipped={skipped}, removed={removed}")
     return {
@@ -2429,8 +2430,7 @@ async def hide_opt_models(
     entity = await client.get_entity(channel_ref)
     peer_id = str(utils.get_peer_id(entity))
 
-    channel_posts = db.get("channel_posts", {})
-    existing = channel_posts.get(peer_id, {})
+    existing = load_channel_posts(peer_id)
     if not isinstance(existing, dict) or not existing:
         return 0
 
@@ -2467,6 +2467,5 @@ async def hide_opt_models(
             meta["hidden"] = True
             updated += 1
 
-    db["channel_posts"][peer_id] = existing
-    save_data(db)
+    save_channel_posts(peer_id, existing)
     return updated

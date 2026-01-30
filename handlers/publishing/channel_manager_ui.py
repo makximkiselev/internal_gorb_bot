@@ -17,6 +17,13 @@ import time
 import hashlib
 
 from storage import load_data, save_data
+from handlers.publishing.storage import (
+    load_managed_channels,
+    save_managed_channels,
+    load_status_extra,
+    save_status_extra,
+    purge_channel_storage,
+)
 from handlers.publishing.channel_updater import sync_channel, hide_opt_models
 from handlers.auth_utils import auth_get
 
@@ -123,16 +130,11 @@ def _is_model_level_node(node: dict | list) -> bool:
 
 # ---------- registry ----------
 def _get_registry() -> dict:
-    db = load_data()
-    reg = db.setdefault("managed_channels", {})
-    save_data(db)
-    return reg
+    return load_managed_channels()
 
 
 def _save_registry(reg: dict) -> None:
-    db = load_data()
-    db["managed_channels"] = reg
-    save_data(db)
+    save_managed_channels(reg)
 
 
 def _is_owner(ch: dict, user_id: int | None) -> bool:
@@ -173,12 +175,10 @@ async def _get_channel_for_cb(cb: CallbackQuery, ch_id: str) -> tuple[Optional[d
 
 
 def _purge_channel_data(peer_id: str) -> None:
-    db = load_data()
-    db.get("managed_channels", {}).pop(peer_id, None)
-    db.get("channel_group_posts", {}).pop(peer_id, None)
-    db.get("channel_posts", {}).pop(peer_id, None)
-    db.get("channel_group_nav", {}).pop(peer_id, None)
-    save_data(db)
+    reg = load_managed_channels()
+    reg.pop(peer_id, None)
+    save_managed_channels(reg)
+    purge_channel_storage(peer_id)
 
 
 # ---------- Файл настроек публикации для каналов ----------
@@ -1200,8 +1200,7 @@ async def cm_img_receive_photo(msg: Message, state: FSMContext):
 
 # ---------- FIN: редактирование финального сообщения канала ----------
 def _load_channel_final_message(ch_id: str) -> str:
-    db = load_data()
-    cfg = db.get("channel_status_extra") or {}
+    cfg = load_status_extra() or {}
     if not isinstance(cfg, dict):
         return ""
     full_peer_id = f"-100{ch_id}"
@@ -1209,11 +1208,9 @@ def _load_channel_final_message(ch_id: str) -> str:
 
 
 def _store_channel_final_message(ch_id: str, text: str, username: Optional[str] = None) -> None:
-    db = load_data()
-    cfg = db.setdefault("channel_status_extra", {})
+    cfg = load_status_extra()
     if not isinstance(cfg, dict):
         cfg = {}
-        db["channel_status_extra"] = cfg
 
     full_peer_id = f"-100{ch_id}"
 
@@ -1225,7 +1222,7 @@ def _store_channel_final_message(ch_id: str, text: str, username: Optional[str] 
     else:
         cfg[full_peer_id] = cleaned
 
-    save_data(db)
+    save_status_extra(cfg)
 
 
 @router.callback_query(F.data.startswith("cm:final:"))
