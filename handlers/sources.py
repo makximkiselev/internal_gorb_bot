@@ -365,36 +365,110 @@ async def process_bot_name(msg: Message, state: FSMContext):
 # === Просмотр всех источников ===
 @router.callback_query(F.data == "list_sources")
 async def list_sources(callback: CallbackQuery):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📺 Каналы", callback_data="src:list:channels")],
+        [InlineKeyboardButton(text="💬 Чаты", callback_data="src:list:chats")],
+        [InlineKeyboardButton(text="🤖 Боты", callback_data="src:list:bots")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="sources")],
+    ])
+    await callback.message.answer("📡 Источники — выбери раздел:", reply_markup=kb)
+
+
+def _src_title(s: dict) -> str:
+    disp = s.get("display_name") or ""
+    disp_txt = f" {disp}" if disp else ""
+    return f"{s.get('name') or '—'}{disp_txt}"
+
+
+def _src_id(s: dict) -> int:
+    for k in ("channel_id", "chat_id", "id"):
+        try:
+            v = s.get(k)
+            if v is not None:
+                return int(v)
+        except Exception:
+            continue
+    return 0
+
+
+def _delete_source(db: dict, src_type: str, src_id: int, user_id: int | None, is_admin: bool) -> int:
+    items = db.get(src_type, []) or []
+    kept = []
+    removed = 0
+    for s in items:
+        if not isinstance(s, dict):
+            continue
+        sid = _src_id(s)
+        if sid != int(src_id):
+            kept.append(s)
+            continue
+        uid = s.get("user_id")
+        if is_admin:
+            if uid is None:
+                removed += 1
+            else:
+                kept.append(s)
+        else:
+            if uid == user_id:
+                removed += 1
+            else:
+                kept.append(s)
+    db[src_type] = kept
+    return removed
+
+
+@router.callback_query(F.data.startswith("src:list:"))
+async def list_sources_by_type(callback: CallbackQuery):
+    _, _, src_type = callback.data.split(":")
+    await _render_sources_type(callback, src_type)
+
+
+async def _render_sources_type(callback: CallbackQuery, src_type: str) -> None:
     db = load_sources()
     ctx = await _get_user_ctx(callback.from_user.id)
     is_admin = ctx.get("role") == "admin"
     db = _filter_sources_by_user(db, callback.from_user.id, is_admin)
-    show_account = is_admin
-    text = "📡 <b>Источники</b>\n\n"
-    if db["channels"]:
-        text += "📺 <b>Каналы:</b>\n"
-        for i, s in enumerate(db["channels"], 1):
-            disp = s.get("display_name") or ""
-            disp_txt = f" {disp}" if disp else ""
-            acc_txt = f" (аккаунт: {s['account']})" if show_account else ""
-            text += f"{i}. {s['name']}{disp_txt}{acc_txt}\n"
-    if db["chats"]:
-        text += "\n💬 <b>Чаты:</b>\n"
-        for i, s in enumerate(db["chats"], 1):
-            disp = s.get("display_name") or ""
-            disp_txt = f" {disp}" if disp else ""
-            acc_txt = f" (аккаунт: {s['account']})" if show_account else ""
-            text += f"{i}. {s['name']}{disp_txt}{acc_txt}\n"
-    if db["bots"]:
-        text += "\n🤖 <b>Боты:</b>\n"
-        for i, s in enumerate(db["bots"], 1):
-            disp = s.get("display_name") or ""
-            disp_txt = f" {disp}" if disp else ""
-            acc_txt = f" (аккаунт: {s['account']})" if show_account else ""
-            text += f"{i}. {s['name']}{disp_txt}{acc_txt}\n"
+    items = db.get(src_type, []) or []
+    rows = []
+    if items:
+        for s in items:
+            sid = _src_id(s)
+            title = _src_title(s)
+            rows.append([InlineKeyboardButton(text=title[:60], callback_data=f"src:item:{src_type}:{sid}")])
+    else:
+        rows.append([InlineKeyboardButton(text="(пусто)", callback_data="src:noop")])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="list_sources")])
+    await callback.message.answer(f"📡 {src_type.capitalize()}:", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
 
-    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="sources")]])
-    await callback.message.answer(text or "⚠️ Источников нет.", reply_markup=kb)
+
+@router.callback_query(F.data.startswith("src:item:"))
+async def source_item_menu(callback: CallbackQuery):
+    _, _, src_type, sid = callback.data.split(":")
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🗑 Удалить", callback_data=f"src:del:{src_type}:{sid}")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"src:list:{src_type}")],
+    ])
+    await callback.message.answer("Действия с источником:", reply_markup=kb)
+
+
+@router.callback_query(F.data.startswith("src:del:"))
+async def source_item_delete(callback: CallbackQuery):
+    _, _, src_type, sid = callback.data.split(":")
+    db = load_sources()
+    ctx = await _get_user_ctx(callback.from_user.id)
+    is_admin = ctx.get("role") == "admin"
+    removed = _delete_source(db, src_type, int(sid), callback.from_user.id, is_admin)
+    save_sources(db)
+    if removed:
+        await callback.answer("Удалено", show_alert=True)
+    else:
+        await callback.answer("Не найдено", show_alert=True)
+    await _render_sources_type(callback, src_type)
+
+
+@router.callback_query(F.data == "src:noop")
+async def _src_noop(callback: CallbackQuery):
+    await callback.answer()
 
 
 # ========= УПРАВЛЕНИЕ БОТАМИ / СЦЕНАРИЯМИ =========
