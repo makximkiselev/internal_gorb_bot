@@ -2,6 +2,7 @@
 from aiogram import Router, F
 from aiogram.types import CallbackQuery, Message, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
+from handlers.auth_utils import auth_get
 from aiogram.fsm.state import StatesGroup, State
 from telethon import TelegramClient
 from pathlib import Path
@@ -51,6 +52,11 @@ def cancel_kb():
 # === Главное меню ===
 @router.callback_query(F.data == "accounts")
 async def accounts_menu(callback: CallbackQuery):
+    u = await auth_get(callback.from_user.id)
+    access = (u or {}).get("access") or {}
+    if not u or not (u.get("role") == "admin" or access.get("settings.accounts")):
+        await callback.answer("⛔️ Нет доступа", show_alert=True)
+        return
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="➕ Добавить аккаунт", callback_data="add_account")],
         [InlineKeyboardButton(text="📋 Список аккаунтов", callback_data="list_accounts")],
@@ -61,6 +67,11 @@ async def accounts_menu(callback: CallbackQuery):
 # === Добавление ===
 @router.callback_query(F.data == "add_account")
 async def add_account(callback: CallbackQuery, state: FSMContext):
+    u = await auth_get(callback.from_user.id)
+    access = (u or {}).get("access") or {}
+    if not u or not (u.get("role") == "admin" or access.get("settings.accounts")):
+        await callback.answer("⛔️ Нет доступа", show_alert=True)
+        return
     await state.set_state(AccountStates.waiting_for_api_id)
     await callback.message.answer("🔑 Введи API_ID:", reply_markup=cancel_kb())
 
@@ -168,6 +179,11 @@ async def finish_auth(msg: Message, state: FSMContext):
 # === Список ===
 @router.callback_query(F.data == "list_accounts")
 async def list_accounts(callback: CallbackQuery):
+    u = await auth_get(callback.from_user.id)
+    access = (u or {}).get("access") or {}
+    if not u or not (u.get("role") == "admin" or access.get("settings.accounts")):
+        await callback.answer("⛔️ Нет доступа", show_alert=True)
+        return
     db = load_sources()
     accounts = db.get("accounts", [])
 
@@ -189,6 +205,11 @@ async def list_accounts(callback: CallbackQuery):
 # === Удаление ===
 @router.callback_query(F.data.startswith("del_account:"))
 async def delete_account(callback: CallbackQuery):
+    u = await auth_get(callback.from_user.id)
+    access = (u or {}).get("access") or {}
+    if not u or not (u.get("role") == "admin" or access.get("settings.accounts")):
+        await callback.answer("⛔️ Нет доступа", show_alert=True)
+        return
     _, name = callback.data.split(":")
     db = load_sources()
     db["accounts"] = [acc for acc in db["accounts"] if acc["name"] != name]

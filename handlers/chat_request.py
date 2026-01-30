@@ -56,7 +56,7 @@ def request_menu_kb():
 @router.callback_query(F.data == "send_request")
 async def send_request_start(callback: CallbackQuery, state: FSMContext):
     u = await auth_get(callback.from_user.id)
-    if not u or not (u.get("role") == "admin" or (u.get("access") or {}).get("send_request")):
+    if not u or not (u.get("role") == "admin" or (u.get("access") or {}).get("main.send_request")):
         await callback.answer("⛔️ Нет доступа", show_alert=True)
         return
     await state.set_state(ChatRequestStates.waiting_for_text)

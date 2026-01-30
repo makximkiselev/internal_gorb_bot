@@ -6,6 +6,7 @@ from handlers.auth_utils import auth_get
 from aiogram.types import CallbackQuery, Message, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
+from telethon_manager import get_all_clients, get_clients_for_user
 
 router = Router()
 
@@ -52,6 +53,29 @@ def _norm(s: str) -> str:
     return s.casefold().strip()
 
 
+async def _get_user_ctx(user_id: int) -> dict:
+    u = await auth_get(user_id)
+    role = (u or {}).get("role")
+    sources_mode = (u or {}).get("sources_mode", "default")
+    return {"user": u, "role": role, "sources_mode": sources_mode}
+
+
+def _filter_sources_by_user(db: dict, user_id: int | None, is_admin: bool) -> dict:
+    def _ok(item: dict) -> bool:
+        uid = item.get("user_id")
+        if is_admin:
+            return uid is None
+        return uid == user_id
+
+    out = {
+        "channels": [s for s in db.get("channels", []) if isinstance(s, dict) and _ok(s)],
+        "chats": [s for s in db.get("chats", []) if isinstance(s, dict) and _ok(s)],
+        "bots": [s for s in db.get("bots", []) if isinstance(s, dict) and _ok(s)],
+        "accounts": db.get("accounts", []) or [],
+    }
+    return out
+
+
 def _is_broadcast_channel(dialog) -> bool:
     e = getattr(dialog, "entity", None)
     return bool(getattr(e, "broadcast", False))
@@ -77,8 +101,11 @@ def _is_bot(dialog) -> bool:
 @router.callback_query(F.data == "sources")
 async def show_sources_menu(callback: CallbackQuery, state: FSMContext):
     u = await auth_get(callback.from_user.id)
-    if not u or not (u.get("role") == "admin" or (u.get("access") or {}).get("menu_settings")):
+    if not u or not (u.get("role") == "admin" or (u.get("access") or {}).get("settings.sources")):
         await callback.answer("⛔️ Нет доступа", show_alert=True)
+        return
+    if u.get("role") != "admin" and u.get("sources_mode") not in ("own", "custom"):
+        await callback.answer("⛔️ Источники недоступны в режиме 'По умолчанию'", show_alert=True)
         return
     await state.clear()
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -94,16 +121,21 @@ async def show_sources_menu(callback: CallbackQuery, state: FSMContext):
 
 
 # === Универсальный поиск ===
-async def _search_dialogs(query: str, src_type: str):
-    from telethon_manager import get_all_clients
-
-    clients = get_all_clients()
+async def _search_dialogs(query: str, src_type: str, *, user_id: int | None = None):
+    if user_id is None:
+        clients = get_all_clients()
+    else:
+        clients = await get_clients_for_user(user_id, include_default=False)
     db = load_sources()
+    if user_id is not None:
+        db = _filter_sources_by_user(db, user_id, False)
 
     # Сырые имена аккаунтов из sources.json
     sources_accounts = [a.get("name", "") for a in db.get("accounts", [])]
     # Нормализованные имена (убираем @, приводим к lower и т.п.)
     sources_accounts_norm = {_norm(name) for name in sources_accounts if name}
+    if user_id is not None:
+        sources_accounts_norm = set()
 
     print("========== SOURCES SEARCH ==========")
     print("🔗 Все клиенты (get_all_clients):", list(clients.keys()))
@@ -185,8 +217,8 @@ def _build_selection_keyboard(found, src_type: str, selected: set[int]):
 
 
 # === Обработка выбора и отображения ===
-async def _handle_search_results(msg: Message, state: FSMContext, src_type: str, query: str):
-    found = await _search_dialogs(query, src_type)
+async def _handle_search_results(msg: Message, state: FSMContext, src_type: str, query: str, user_id: int | None = None):
+    found = await _search_dialogs(query, src_type, user_id=user_id)
     if not found:
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🔁 Повторить поиск", callback_data=f"add_{src_type}")],
@@ -238,6 +270,8 @@ async def save_selected(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     found = data.get("found", [])
     selected = set(data.get("selected", []))
+    ctx = await _get_user_ctx(callback.from_user.id)
+    is_admin = ctx.get("role") == "admin"
 
     if not selected:
         await callback.answer("⚠️ Ничего не выбрано", show_alert=True)
@@ -248,6 +282,8 @@ async def save_selected(callback: CallbackQuery, state: FSMContext):
     for acc, eid, name in found:
         if eid in selected:
             entry = {"name": name, "channel_id": int(eid), "account": acc}
+            if not is_admin:
+                entry["user_id"] = callback.from_user.id
             # для ботов тоже пишем в "bots"
             db[src_type + "s"].append(entry)
             count += 1
@@ -272,7 +308,7 @@ async def add_channel(callback: CallbackQuery, state: FSMContext):
 @router.message(SourceStates.waiting_for_channel)
 async def process_channel_name(msg: Message, state: FSMContext):
     query = _norm(msg.text.strip())
-    await _handle_search_results(msg, state, "channel", query)
+    await _handle_search_results(msg, state, "channel", query, user_id=msg.from_user.id)
 
 
 @router.callback_query(F.data == "add_chat")
@@ -284,7 +320,7 @@ async def add_chat(callback: CallbackQuery, state: FSMContext):
 @router.message(SourceStates.waiting_for_chat)
 async def process_chat_name(msg: Message, state: FSMContext):
     query = _norm(msg.text.strip())
-    await _handle_search_results(msg, state, "chat", query)
+    await _handle_search_results(msg, state, "chat", query, user_id=msg.from_user.id)
 
 
 @router.callback_query(F.data == "add_bot")
@@ -296,13 +332,16 @@ async def add_bot(callback: CallbackQuery, state: FSMContext):
 @router.message(SourceStates.waiting_for_bot)
 async def process_bot_name(msg: Message, state: FSMContext):
     query = _norm(msg.text.strip())
-    await _handle_search_results(msg, state, "bot", query)
+    await _handle_search_results(msg, state, "bot", query, user_id=msg.from_user.id)
 
 
 # === Просмотр всех источников ===
 @router.callback_query(F.data == "list_sources")
 async def list_sources(callback: CallbackQuery):
     db = load_sources()
+    ctx = await _get_user_ctx(callback.from_user.id)
+    is_admin = ctx.get("role") == "admin"
+    db = _filter_sources_by_user(db, callback.from_user.id, is_admin)
     text = "📡 <b>Источники</b>\n\n"
     if db["channels"]:
         text += "📺 <b>Каналы:</b>\n"
@@ -326,6 +365,9 @@ async def list_sources(callback: CallbackQuery):
 async def _show_bot_scenario(message: Message, bot_id: int):
     """Рендер сценария одного бота по его channel_id."""
     db = load_sources()
+    ctx = await _get_user_ctx(message.from_user.id)
+    is_admin = ctx.get("role") == "admin"
+    db = _filter_sources_by_user(db, message.from_user.id, is_admin)
     bots = db.get("bots", []) or []
     bot = next((b for b in bots if int(b.get("channel_id")) == int(bot_id)), None)
     if not bot:
@@ -370,6 +412,9 @@ async def manage_bots(callback: CallbackQuery, state: FSMContext):
     """Показ списка ботов для управления сценариями."""
     await state.clear()
     db = load_sources()
+    ctx = await _get_user_ctx(callback.from_user.id)
+    is_admin = ctx.get("role") == "admin"
+    db = _filter_sources_by_user(db, callback.from_user.id, is_admin)
     bots = db.get("bots", []) or []
 
     if not bots:
@@ -403,17 +448,30 @@ async def manage_bot(callback: CallbackQuery):
     bot_id = int(bot_id_str)
 
     db = load_sources()
+    ctx = await _get_user_ctx(callback.from_user.id)
+    is_admin = ctx.get("role") == "admin"
     bots = db.get("bots", []) or []
     changed = False
 
+    target_bot = None
     for b in bots:
         if int(b.get("channel_id")) == bot_id:
+            if is_admin and b.get("user_id") is not None:
+                await callback.answer("⛔️ Нет доступа", show_alert=True)
+                return
+            if not is_admin and b.get("user_id") != callback.from_user.id:
+                await callback.answer("⛔️ Нет доступа", show_alert=True)
+                return
+            target_bot = b
             scenario = b.get("scenario") or []
             if not scenario:
                 # 2) если путь эмуляции действий нет, то автоматом создается команда "/start"
                 b["scenario"] = [{"kind": "command", "value": "/start"}]
                 changed = True
             break
+    if not target_bot:
+        await callback.answer("⚠️ Бот не найден", show_alert=True)
+        return
 
     if changed:
         db["bots"] = bots
@@ -489,9 +547,19 @@ async def bot_action_value(msg: Message, state: FSMContext):
     db = load_sources()
     bots = db.get("bots", []) or []
     updated = False
+    ctx = await _get_user_ctx(msg.from_user.id)
+    is_admin = ctx.get("role") == "admin"
 
     for b in bots:
         if int(b.get("channel_id")) == int(bot_id):
+            if is_admin and b.get("user_id") is not None:
+                await msg.answer("⛔️ Нет доступа")
+                await state.clear()
+                return
+            if not is_admin and b.get("user_id") != msg.from_user.id:
+                await msg.answer("⛔️ Нет доступа")
+                await state.clear()
+                return
             scenario = b.get("scenario") or []
             scenario.append({"kind": kind, "value": value})
             b["scenario"] = scenario

@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from aiogram import Router, F
 from handlers.auth_utils import auth_get
+from handlers.parsing.context import DEFAULT_BASE_DIR, user_data_dir
 from aiogram.filters import Command
 from aiogram.types import (
     CallbackQuery,
@@ -91,15 +92,23 @@ def _load_etalon_tree() -> Dict[str, Any]:
     return _ETALON_CACHE
 
 
-def _ensure_parsed_data() -> Dict[str, Any]:
+def _ensure_parsed_data(path: Path) -> Dict[str, Any]:
     """
     UI НЕ пересобирает данные.
     parsed_data.json должен строиться пайплайном (results.py / main.py).
     """
-    data = _read_json(PARSED_DATA_JSON, None)
+    data = _read_json(path, None)
     if not isinstance(data, dict) or not isinstance(data.get("catalog"), dict):
         return {"catalog": OrderedDict(), "timestamp": "", "stats": {}}
     return data
+
+
+def _parsed_data_path_for_user(u: dict | None) -> Path:
+    if not u or u.get("role") == "admin":
+        return DEFAULT_BASE_DIR / "parsed_data.json"
+    if u.get("role") == "paid_user" and u.get("sources_mode") in ("own", "custom"):
+        return user_data_dir(u["id"]) / "parsed_data.json"
+    return DEFAULT_BASE_DIR / "parsed_data.json"
 
 
 def _get_catalog_root(data: Dict[str, Any]) -> Dict[str, Any]:
@@ -420,10 +429,11 @@ def _render_branch_text(path: List[str]) -> str:
 @router.message(Command("prices"))
 async def cmd_prices(message: Message):
     u = await auth_get(message.from_user.id)
-    if not u or not (u.get("role") == "admin" or (u.get("access") or {}).get("view_prices")):
+    access = (u or {}).get("access") or {}
+    if not u or not (u.get("role") == "admin" or access.get("main.view_prices") or access.get("products.view_prices")):
         await message.answer("⛔️ Нет доступа")
         return
-    data = _ensure_parsed_data()
+    data = _ensure_parsed_data(_parsed_data_path_for_user(u))
     root = _get_catalog_root(data)
     children = list(root.keys())  # order as in JSON
     await message.answer(_render_branch_text([]), reply_markup=_kb_home(children))
@@ -432,10 +442,11 @@ async def cmd_prices(message: Message):
 @router.callback_query(F.data == "view_prices")
 async def cb_open_prices(callback: CallbackQuery):
     u = await auth_get(callback.from_user.id)
-    if not u or not (u.get("role") == "admin" or (u.get("access") or {}).get("view_prices")):
+    access = (u or {}).get("access") or {}
+    if not u or not (u.get("role") == "admin" or access.get("main.view_prices") or access.get("products.view_prices")):
         await callback.answer("⛔️ Нет доступа", show_alert=True)
         return
-    data = _ensure_parsed_data()
+    data = _ensure_parsed_data(_parsed_data_path_for_user(u))
     root = _get_catalog_root(data)
     children = list(root.keys())
     await callback.message.edit_text(_render_branch_text([]), reply_markup=_kb_home(children))
@@ -444,7 +455,8 @@ async def cb_open_prices(callback: CallbackQuery):
 
 @router.callback_query(F.data == "vp:home")
 async def cb_home(callback: CallbackQuery):
-    data = _ensure_parsed_data()
+    u = await auth_get(callback.from_user.id)
+    data = _ensure_parsed_data(_parsed_data_path_for_user(u))
     root = _get_catalog_root(data)
     children = list(root.keys())
     await callback.message.edit_text(_render_branch_text([]), reply_markup=_kb_home(children))
@@ -470,7 +482,8 @@ async def cb_go(callback: CallbackQuery):
 
     path = _cache_get(token)
 
-    data = _ensure_parsed_data()
+    u = await auth_get(callback.from_user.id)
+    data = _ensure_parsed_data(_parsed_data_path_for_user(u))
     root = _get_catalog_root(data)
 
     node = _dig(root, path)
@@ -517,7 +530,8 @@ async def cb_all_prices(callback: CallbackQuery):
 
     branch_path = _cache_get(token)
 
-    data = _ensure_parsed_data()
+    u = await auth_get(callback.from_user.id)
+    data = _ensure_parsed_data(_parsed_data_path_for_user(u))
     root = _get_catalog_root(data)
     subtree = _dig(root, branch_path)
 

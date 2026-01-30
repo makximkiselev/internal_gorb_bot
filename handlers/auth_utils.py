@@ -38,16 +38,57 @@ def _auth_default() -> dict:
 
 def _default_access() -> dict:
     return {
-        "view_prices": True,
-        "menu_products": True,
-        "menu_sales": True,
-        "menu_external": True,
-        "menu_settings": True,
-        "send_request": True,
+        "main.view_prices": True,
+        "main.send_request": True,
+        "products.catalog": True,
+        "products.collect": True,
+        "products.view_prices": True,
+        "sales.receipt": True,
+        "external.update_gsheet": True,
+        "external.competitors": True,
+        "settings.auth": True,
+        "settings.sources": True,
+        "settings.auto_replies": True,
+        "settings.accounts": True,
+        "settings.cm": True,
     }
 
-def _default_use_default_sources() -> bool:
-    return True
+def _default_sources_mode() -> str:
+    return "default"
+
+def _normalize_access(access: dict | None) -> dict:
+    if not isinstance(access, dict):
+        access = {}
+
+    # миграция со старых ключей
+    old_to_main = {
+        "view_prices": "main.view_prices",
+        "send_request": "main.send_request",
+    }
+    for old, new in old_to_main.items():
+        if old in access and new not in access:
+            access[new] = bool(access.get(old))
+
+    if access.get("menu_products") or access.get("main.products"):
+        access.setdefault("products.catalog", True)
+        access.setdefault("products.collect", True)
+        access.setdefault("products.view_prices", True)
+    if access.get("menu_sales") or access.get("main.sales"):
+        access.setdefault("sales.receipt", True)
+    if access.get("menu_external") or access.get("main.external"):
+        access.setdefault("external.update_gsheet", True)
+        access.setdefault("external.competitors", True)
+    if access.get("menu_settings") or access.get("main.settings"):
+        access.setdefault("settings.auth", True)
+        access.setdefault("settings.sources", True)
+        access.setdefault("settings.auto_replies", True)
+        access.setdefault("settings.accounts", True)
+        access.setdefault("settings.cm", True)
+
+    defaults = _default_access()
+    for k, v in defaults.items():
+        access.setdefault(k, v)
+    return access
 
 
 async def auth_load() -> dict:
@@ -87,7 +128,7 @@ async def auth_upsert_user(tg_user: Any, role_if_new: str = "pending") -> dict:
             "role": role_if_new,  # pending/user/admin/rejected
             "paid_account": None,
             "access": _default_access(),
-            "use_default_sources": _default_use_default_sources(),
+            "sources_mode": _default_sources_mode(),
         }
         await auth_save(doc)
         return users[uid]
@@ -98,8 +139,8 @@ async def auth_upsert_user(tg_user: Any, role_if_new: str = "pending") -> dict:
     u["first_name"] = getattr(tg_user, "first_name", None)
     u["last_name"] = getattr(tg_user, "last_name", None)
     u.setdefault("paid_account", None)
-    u.setdefault("access", _default_access())
-    u.setdefault("use_default_sources", _default_use_default_sources())
+    u["access"] = _normalize_access(u.get("access"))
+    u.setdefault("sources_mode", _default_sources_mode())
     await auth_save(doc)
     return u
 
@@ -137,14 +178,13 @@ async def auth_toggle_access(user_id: int, key: str) -> Optional[dict]:
     await auth_save(doc)
     return users[uid]
 
-
-async def auth_set_use_default_sources(user_id: int, value: bool) -> Optional[dict]:
+async def auth_set_sources_mode(user_id: int, mode: str) -> Optional[dict]:
     doc = await auth_load()
     uid = str(int(user_id))
     users = doc.setdefault("users", {})
     if uid not in users:
         return None
-    users[uid]["use_default_sources"] = bool(value)
+    users[uid]["sources_mode"] = mode
     await auth_save(doc)
     return users[uid]
 
@@ -156,11 +196,12 @@ async def auth_get(user_id: int) -> Optional[dict]:
     if not u:
         return None
     changed = False
-    if "access" not in u:
-        u["access"] = _default_access()
-        changed = True
-    if "use_default_sources" not in u:
-        u["use_default_sources"] = _default_use_default_sources()
+    u["access"] = _normalize_access(u.get("access"))
+    if "sources_mode" not in u:
+        if "use_default_sources" in u:
+            u["sources_mode"] = "default" if u.get("use_default_sources") else "own"
+        else:
+            u["sources_mode"] = _default_sources_mode()
         changed = True
     if changed:
         await auth_save(doc)

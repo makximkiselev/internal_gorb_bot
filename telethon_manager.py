@@ -1,6 +1,7 @@
 # telethon_manager.py
 import os
 import asyncio
+import json
 from pathlib import Path
 from telethon import TelegramClient
 
@@ -9,6 +10,7 @@ SESSIONS_DIR = Path("sessions")
 SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
 
 SOURCES_FILE = Path("sources.json")
+PAID_AUTH_FILE = Path("data") / "auth_users.json"
 
 # --- Тонкая настройка (через ENV) ---
 # Сколько диалогов подгружать при вынужденном прогреве (когда numeric id не резолвится)
@@ -56,6 +58,7 @@ def _strip_at(s: str | None) -> str:
 
 # === Глобальный пул клиентов (ключи в lower) ===
 clients: dict[str, TelegramClient] = {}
+_paid_clients: dict[int, TelegramClient] = {}
 
 # === Кэш сущностей (ускоряет get_entity) ===
 # Структура: {id(client): {cache_key: entity}}
@@ -293,6 +296,49 @@ def get_client(name: str) -> TelegramClient | None:
 def get_all_clients() -> dict[str, TelegramClient]:
     """Вернуть все активные клиенты (ключи — lower, + алиасы)."""
     return clients
+
+
+def _load_paid_account(user_id: int) -> dict | None:
+    if not PAID_AUTH_FILE.exists():
+        return None
+    try:
+        data = json.loads(PAID_AUTH_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    u = (data.get("users") or {}).get(str(int(user_id))) or {}
+    paid = u.get("paid_account") or {}
+    if paid.get("status") != "ready":
+        return None
+    return paid
+
+
+async def get_paid_client(user_id: int) -> TelegramClient | None:
+    if user_id in _paid_clients:
+        return _paid_clients[user_id]
+    paid = _load_paid_account(user_id)
+    if not paid:
+        return None
+    try:
+        session_path = Path(paid.get("session") or SESSIONS_DIR / f"paid_{user_id}.session")
+        api_id = int(paid["api_id"])
+        api_hash = paid["api_hash"]
+        client = TelegramClient(session_path, api_id, api_hash)
+        await client.connect()
+        _paid_clients[user_id] = client
+        return client
+    except Exception:
+        return None
+
+
+async def get_clients_for_user(user_id: int, include_default: bool = True) -> dict[str, TelegramClient]:
+    out: dict[str, TelegramClient] = {}
+    if include_default:
+        out.update(get_all_clients())
+    paid_client = await get_paid_client(user_id)
+    if paid_client:
+        key = f"paid_{user_id}"
+        out[key] = paid_client
+    return out
 
 async def reload_clients(register_listeners: bool = True) -> dict[str, TelegramClient]:
     """Полностью перезагрузить клиентов из sources.json."""

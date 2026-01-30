@@ -3,7 +3,7 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQu
 import asyncio
 
 from handlers.competitors.competitor_prices import competitor_prices_run_once
-from handlers.auth_utils import is_admin  # ✅ вынести из main, иначе циклический импорт
+from handlers.auth_utils import is_admin, auth_get  # ✅ вынести из main, иначе циклический импорт
 
 router = Router(name="competitors_ui")
 
@@ -33,9 +33,15 @@ def kb_after_run():
 @router.callback_query(F.data == "competitors")
 async def competitors_menu(callback: CallbackQuery):
     user = callback.from_user
-    if not user or not await is_admin(user.id):
-        await callback.answer("⛔️ Только для админов", show_alert=True)
+    if not user:
+        await callback.answer("⛔️ Нет доступа", show_alert=True)
         return
+    if not await is_admin(user.id):
+        u = await auth_get(user.id)
+        access = (u or {}).get("access") or {}
+        if not access.get("external.competitors"):
+            await callback.answer("⛔️ Нет доступа", show_alert=True)
+            return
 
     await callback.answer()
 
@@ -60,9 +66,15 @@ async def competitors_menu(callback: CallbackQuery):
 @router.callback_query(F.data == "competitors:run")
 async def competitors_run(callback: CallbackQuery):
     user = callback.from_user
-    if not user or not await is_admin(user.id):
-        await callback.answer("⛔️ Только для админов", show_alert=True)
+    if not user:
+        await callback.answer("⛔️ Нет доступа", show_alert=True)
         return
+    if not await is_admin(user.id):
+        u = await auth_get(user.id)
+        access = (u or {}).get("access") or {}
+        if not access.get("external.competitors"):
+            await callback.answer("⛔️ Нет доступа", show_alert=True)
+            return
 
     await callback.answer()
     msg = await callback.message.answer("⏳ Запускаю парсер конкурентов…")

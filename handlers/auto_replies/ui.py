@@ -6,6 +6,7 @@ from aiogram.types import (
     InlineKeyboardButton,
     Message,
 )
+from handlers.auth_utils import auth_get
 from storage import load_data, save_data
 
 router = Router()
@@ -66,12 +67,22 @@ async def _render_settings_message(callback: CallbackQuery, *, edit: bool = Fals
 
 @router.callback_query(F.data == "auto_replies")
 async def show_auto_replies(callback: CallbackQuery):
+    u = await auth_get(callback.from_user.id)
+    access = (u or {}).get("access") or {}
+    if not u or not (u.get("role") == "admin" or access.get("settings.auto_replies")):
+        await callback.answer("⛔️ Нет доступа", show_alert=True)
+        return
     await callback.answer()
     await _render_settings_message(callback, edit=False)
 
 
 @router.callback_query(F.data == "toggle_auto_replies")
 async def toggle_auto_replies(callback: CallbackQuery):
+    u = await auth_get(callback.from_user.id)
+    access = (u or {}).get("access") or {}
+    if not u or not (u.get("role") == "admin" or access.get("settings.auto_replies")):
+        await callback.answer("⛔️ Нет доступа", show_alert=True)
+        return
     db = load_data()
     enabled = not db.get("auto_replies_enabled", False)
     db["auto_replies_enabled"] = enabled

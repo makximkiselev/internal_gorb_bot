@@ -1,5 +1,6 @@
 from aiogram import Router, F
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from handlers.auth_utils import auth_get
 from storage import load_data
 from . import etalon   # для вызова render_etalon_menu
 from aiogram.fsm.context import FSMContext
@@ -18,6 +19,11 @@ def catalog_menu():
 
 @router.callback_query(F.data == "catalog_menu")
 async def show_catalog_menu(callback: CallbackQuery):
+    u = await auth_get(callback.from_user.id)
+    access = (u or {}).get("access") or {}
+    if not u or not (u.get("role") == "admin" or access.get("products.catalog")):
+        await callback.answer("⛔️ Нет доступа", show_alert=True)
+        return
     await callback.answer()
     await callback.message.answer("📂 Меню каталога", reply_markup=catalog_menu())
 
@@ -25,6 +31,11 @@ async def show_catalog_menu(callback: CallbackQuery):
 # === Показ всего каталога с кнопками по сериям ===
 @router.callback_query(F.data == "show_full_catalog")
 async def show_full_catalog(callback: CallbackQuery):
+    u = await auth_get(callback.from_user.id)
+    access = (u or {}).get("access") or {}
+    if not u or not (u.get("role") == "admin" or access.get("products.catalog")):
+        await callback.answer("⛔️ Нет доступа", show_alert=True)
+        return
     db = load_data()
     catalog = db.get("etalon", {})
     etalons = catalog

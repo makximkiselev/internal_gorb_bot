@@ -18,6 +18,7 @@ import hashlib
 
 from storage import load_data, save_data
 from handlers.publishing.channel_updater import sync_channel, hide_opt_models
+from handlers.auth_utils import auth_get
 
 router = Router()
 
@@ -386,6 +387,11 @@ async def _resolve_channel_via_telethon(raw: str):
 
 @router.callback_query(F.data == "cm:add_start")
 async def cm_add_start(cb: CallbackQuery, state: FSMContext):
+    u = await auth_get(cb.from_user.id)
+    access = (u or {}).get("access") or {}
+    if not u or not (u.get("role") == "admin" or access.get("settings.cm")):
+        await cb.answer("⛔️ Нет доступа", show_alert=True)
+        return
     await state.set_state(AddChannelStates.waiting_for_input)
     await cb.message.edit_text(
         "🎯 Добавление канала\n\n"
@@ -436,6 +442,11 @@ async def cm_add_handle_input(msg: Message, state: FSMContext):
 # ---------- aiogram handlers ----------
 @router.callback_query(F.data == "cm:open")
 async def cm_open(cb: CallbackQuery):
+    u = await auth_get(cb.from_user.id)
+    access = (u or {}).get("access") or {}
+    if not u or not (u.get("role") == "admin" or access.get("settings.cm")):
+        await cb.answer("⛔️ Нет доступа", show_alert=True)
+        return
     reg = _get_registry()
     await cb.message.edit_text(
         "📣 Управление каналами:\nВыберите канал для действий.",
@@ -450,6 +461,11 @@ async def cm_close(cb: CallbackQuery):
 
 @router.callback_query(F.data.startswith("cm:view:"))
 async def cm_view(cb: CallbackQuery):
+    u = await auth_get(cb.from_user.id)
+    access = (u or {}).get("access") or {}
+    if not u or not (u.get("role") == "admin" or access.get("settings.cm")):
+        await cb.answer("⛔️ Нет доступа", show_alert=True)
+        return
     ch_id = cb.data.split(":")[-1]
     reg = _get_registry()
     ch = reg.get(ch_id)

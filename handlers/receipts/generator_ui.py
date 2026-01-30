@@ -17,6 +17,7 @@ from aiogram.types import (
 )
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
+from handlers.auth_utils import auth_get
 
 from .generator import generate_receipt_pdf, get_last_receipts, RECEIPTS_DIR
 
@@ -127,12 +128,22 @@ def done_kb() -> InlineKeyboardMarkup:
 @router.message(F.text.casefold() == "товарный чек")
 async def open_receipt_menu_message(message: Message):
     """Пользователь нажал кнопку 'товарный чек' (ReplyKeyboard)."""
+    u = await auth_get(message.from_user.id)
+    access = (u or {}).get("access") or {}
+    if not u or not (u.get("role") == "admin" or access.get("sales.receipt")):
+        await message.answer("⛔️ Нет доступа")
+        return
     await message.answer("Меню товарных чеков:", reply_markup=receipt_root_kb())
 
 
 @router.callback_query(F.data == "receipt:menu")
 async def open_receipt_menu_callback(callback: CallbackQuery):
     """Открыть меню товарных чеков по callback."""
+    u = await auth_get(callback.from_user.id)
+    access = (u or {}).get("access") or {}
+    if not u or not (u.get("role") == "admin" or access.get("sales.receipt")):
+        await callback.answer("⛔️ Нет доступа", show_alert=True)
+        return
     if callback.message:
         await callback.message.edit_text(
             "Меню товарных чеков:",

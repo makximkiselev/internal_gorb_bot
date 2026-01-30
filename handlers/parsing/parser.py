@@ -16,13 +16,15 @@ from aiogram import Router, F
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 
 # твои импорты (как было)
-from telethon_manager import get_all_clients, resolve_entity  # noqa
+from telethon_manager import get_all_clients, resolve_entity, get_clients_for_user  # noqa
+from handlers.auth_utils import auth_get
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from handlers.normalizers.entry import run_build_parsed_goods, run_build_parsed_etalon
+from handlers.parsing.context import set_parsing_data_dir, user_data_dir, DEFAULT_BASE_DIR
 
 router = Router()
 
@@ -49,12 +51,19 @@ def collect_menu_keyboard() -> InlineKeyboardMarkup:
 
 @router.callback_query(F.data == "collect")
 async def collect_menu(callback: CallbackQuery):
+    u = await auth_get(callback.from_user.id)
+    access = (u or {}).get("access") or {}
+    if not u or not (u.get("role") == "admin" or access.get("products.collect")):
+        await callback.answer("⛔️ Нет доступа", show_alert=True)
+        return
     if callback.message:
         await callback.message.answer("🏷 Выбери режим парсинга:", reply_markup=collect_menu_keyboard())
     try:
         await callback.answer()
     except Exception:
         pass
+    if (u or {}).get("role") != "admin":
+        set_parsing_data_dir(DEFAULT_BASE_DIR)
 
 
 @router.callback_query(F.data == "show_unmatched")
@@ -87,6 +96,18 @@ async def clear_prices(callback: CallbackQuery):
 
 @router.callback_query(F.data == "collect_all")
 async def collect_all(callback: CallbackQuery):
+    u = await auth_get(callback.from_user.id)
+    access = (u or {}).get("access") or {}
+    if not u or not (u.get("role") == "admin" or access.get("products.collect")):
+        await callback.answer("⛔️ Нет доступа", show_alert=True)
+        return
+    if u.get("role") != "admin" and u.get("sources_mode") == "default":
+        await callback.message.answer("⛔️ В режиме 'По умолчанию' сбор своих цен недоступен.")
+        return
+    if u.get("role") == "admin":
+        set_parsing_data_dir(DEFAULT_BASE_DIR)
+    else:
+        set_parsing_data_dir(user_data_dir(callback.from_user.id))
     _reset_outputs()
 
     # ✅ дефолты, чтобы не словить UnboundLocalError даже если что-то упадёт раньше
@@ -99,7 +120,11 @@ async def collect_all(callback: CallbackQuery):
         await callback.message.answer("🚀 Запускаю сбор сообщений…")
 
     # --- collect stage ---
-    messages, stats_sources = await collect_messages()
+    if (u or {}).get("role") == "admin":
+        messages, stats_sources = await collect_messages()
+    else:
+        sources_mode = (u or {}).get("sources_mode", "default")
+        messages, stats_sources = await collect_messages(user_id=callback.from_user.id, sources_mode=sources_mode)
 
     # --- errors per source (collect stage) ---
     per = (stats_sources or {}).get("per_source") or []
@@ -160,6 +185,41 @@ async def collect_all(callback: CallbackQuery):
             run_results()
 
     await asyncio.to_thread(_run_pipeline)
+
+    # кастом: дополняем пользовательский matched нашими данными и пересобираем parsed_data.json
+    if (u or {}).get("role") != "admin" and (u or {}).get("sources_mode") == "custom":
+        try:
+            from handlers.parsing import results as results_mod
+            base_matched = (DEFAULT_BASE_DIR / "parsed_matched.json")
+            user_dir = user_data_dir(callback.from_user.id)
+            user_matched = user_dir / "parsed_matched.json"
+
+            def _load_items(p: Path) -> list[dict]:
+                if not p.exists():
+                    return []
+                try:
+                    raw = json.loads(p.read_text(encoding="utf-8"))
+                except Exception:
+                    return []
+                if isinstance(raw, dict) and isinstance(raw.get("items"), list):
+                    return [x for x in raw["items"] if isinstance(x, dict)]
+                if isinstance(raw, list):
+                    return [x for x in raw if isinstance(x, dict)]
+                return []
+
+            merged_items = _load_items(base_matched) + _load_items(user_matched)
+            user_matched.write_text(
+                json.dumps(
+                    {"items": merged_items, "items_count": len(merged_items)},
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+            set_parsing_data_dir(user_dir)
+            results_mod.rebuild_parsed_data_all()
+        except Exception:
+            pass
 
     total_msgs = len(parsed_messages)
     total_lines = sum(int(m.get("lines_count") or 0) for m in parsed_messages)
@@ -1093,12 +1153,49 @@ def _load_sources_from_file() -> Tuple[Dict[str, List[Dict[str, Any]]], Optional
     return {"channels": channels, "bots": bots}, path
 
 
-def _clients_map() -> Dict[str, Any]:
+def _filter_sources_for_user(
+    sources_pack: Dict[str, List[Dict[str, Any]]],
+    user_id: int | None,
+    sources_mode: str,
+) -> Dict[str, List[Dict[str, Any]]]:
+    if user_id is None:
+        return sources_pack
+
+    def _is_own(item: dict) -> bool:
+        return item.get("user_id") == user_id
+
+    def _is_default(item: dict) -> bool:
+        return item.get("user_id") is None
+
+    channels = sources_pack.get("channels", []) or []
+    bots = sources_pack.get("bots", []) or []
+
+    if sources_mode == "default":
+        return {
+            "channels": [s for s in channels if _is_default(s)],
+            "bots": [s for s in bots if _is_default(s)],
+        }
+    if sources_mode == "custom":
+        return {
+            "channels": [s for s in channels if _is_own(s)],
+            "bots": [s for s in bots if _is_own(s)],
+        }
+    # "own"
+    return {
+        "channels": [s for s in channels if _is_own(s)],
+        "bots": [s for s in bots if _is_own(s)],
+    }
+
+
+async def _clients_map(user_id: int | None = None, include_default: bool = True) -> Dict[str, Any]:
     """
     ✅ В рабочем коде get_all_clients() возвращал dict.
     Но на всякий случай поддержим и list.
     """
-    cl = get_all_clients()
+    if user_id is None:
+        cl = get_all_clients()
+    else:
+        cl = await get_clients_for_user(user_id, include_default=include_default)
     if isinstance(cl, dict):
         return cl
 
@@ -1241,7 +1338,10 @@ async def _collect_new_messages_after_id(
     return collected
 
 
-async def collect_messages() -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+async def collect_messages(
+    user_id: int | None = None,
+    sources_mode: str = "default",
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """
     ✅ ИТОГ: поведение как в твоём рабочем файле:
     - sources.json читаем из CWD
@@ -1250,6 +1350,7 @@ async def collect_messages() -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     - для bot: парсим только сообщения ПОСЛЕ scenario (baseline_id)
     """
     sources_pack, sources_path = _load_sources_from_file()
+    sources_pack = _filter_sources_for_user(sources_pack, user_id, sources_mode)
     channels = sources_pack.get("channels", []) or []
     bots = sources_pack.get("bots", []) or []
 
@@ -1263,7 +1364,7 @@ async def collect_messages() -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
             "sources_path": str(sources_path) if sources_path else None,
         }
 
-    clients = _clients_map()
+    clients = await _clients_map(user_id=user_id, include_default=(sources_mode == "default"))
     if not clients:
         return [], {
             "total": 0,

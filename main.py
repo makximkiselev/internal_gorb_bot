@@ -61,7 +61,7 @@ from handlers.auth_utils import (
     auth_list_by_role,
     auth_set_access,
     auth_toggle_access,
-    auth_set_use_default_sources,
+    auth_set_sources_mode,
     display_user,
     is_admin,
 )
@@ -215,22 +215,28 @@ def run_bot():
             access = u.get("access") or {}
             return bool(access.get(key, False))
 
+        def _any_access(u: dict, keys: list[str]) -> bool:
+            return any(_access_allowed(u, k) for k in keys)
+
         def _main_menu_user(u: dict):
             role = u.get("role", "pending")
             # 👤 Обычный пользователь: только "Посмотреть цены"
             if role != "admin":
                 rows = []
-                if _access_allowed(u, "view_prices"):
+                if _access_allowed(u, "main.view_prices"):
                     rows.append([InlineKeyboardButton(text="👁 Посмотреть цены", callback_data="view_prices")])
-                if _access_allowed(u, "send_request"):
+                if _access_allowed(u, "main.send_request"):
                     rows.append([InlineKeyboardButton(text="📨 Отправить запрос", callback_data="send_request")])
-                if _access_allowed(u, "menu_products"):
+                if _any_access(u, ["products.catalog", "products.collect", "products.view_prices"]):
                     rows.append([InlineKeyboardButton(text="🧾 Товары и цены", callback_data="menu:products")])
-                if _access_allowed(u, "menu_sales"):
+                if _access_allowed(u, "sales.receipt"):
                     rows.append([InlineKeyboardButton(text="💰 Продажи", callback_data="menu:sales")])
-                if _access_allowed(u, "menu_external"):
+                if _any_access(u, ["external.update_gsheet", "external.competitors"]):
                     rows.append([InlineKeyboardButton(text="📊 Внешние таблицы", callback_data="menu:external")])
-                if _access_allowed(u, "menu_settings"):
+                settings_keys = ["settings.auth", "settings.auto_replies", "settings.accounts", "settings.cm"]
+                if u.get("role") == "admin" or u.get("sources_mode") in ("own", "custom"):
+                    settings_keys.append("settings.sources")
+                if _any_access(u, settings_keys):
                     rows.append([InlineKeyboardButton(text="⚙️ Настройки", callback_data="menu:settings")])
                 if not rows:
                     rows = [[InlineKeyboardButton(text="👁 Посмотреть цены", callback_data="view_prices")]]
@@ -253,53 +259,75 @@ def run_bot():
                 return "💼 Клиент"
             return "👤 Пользователь"
 
-        ACCESS_OPTIONS = [
-            ("view_prices", "👁 Посмотреть цены"),
-            ("menu_products", "🧾 Товары и цены"),
-            ("menu_sales", "💰 Продажи"),
-            ("menu_external", "📊 Внешние таблицы"),
-            ("menu_settings", "⚙️ Настройки"),
-            ("send_request", "📨 Отправить запрос"),
+        ACCESS_GROUPS = [
+            ("Главное меню", [
+                ("main.view_prices", "👁 Посмотреть цены"),
+                ("main.send_request", "📨 Отправить запрос"),
+            ]),
+            ("Товары и цены", [
+                ("products.catalog", "🛠 Каталог"),
+                ("products.collect", "🏷 Собрать цены"),
+                ("products.view_prices", "👁 Посмотреть цены"),
+            ]),
+            ("Продажи", [
+                ("sales.receipt", "🧾 Товарный чек"),
+            ]),
+            ("Внешние таблицы", [
+                ("external.update_gsheet", "🔄 Обновить Google таблицу"),
+                ("external.competitors", "📊 Цены конкурентов"),
+            ]),
+            ("Настройки", [
+                ("settings.auth", "🔐 Авторизация"),
+                ("settings.sources", "📡 Источники"),
+                ("settings.auto_replies", "🤖 Автоответы"),
+                ("settings.accounts", "👤 Аккаунты"),
+                ("settings.cm", "🗂 Управление каналами"),
+            ]),
         ]
 
-        def products_menu_kb():
-            return InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [InlineKeyboardButton(text="🛠 Каталог", callback_data="catalog_menu")],
-                    [InlineKeyboardButton(text="🏷 Собрать цены", callback_data="collect")],
-                    [InlineKeyboardButton(text="👁 Посмотреть цены", callback_data="view_prices")],
-                    [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")],
-                ]
-            )
+        def products_menu_kb(u: dict):
+            rows = []
+            if _access_allowed(u, "products.catalog"):
+                rows.append([InlineKeyboardButton(text="🛠 Каталог", callback_data="catalog_menu")])
+            if _access_allowed(u, "products.collect"):
+                rows.append([InlineKeyboardButton(text="🏷 Собрать цены", callback_data="collect")])
+            if _access_allowed(u, "products.view_prices"):
+                rows.append([InlineKeyboardButton(text="👁 Посмотреть цены", callback_data="view_prices")])
+            rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")])
+            return InlineKeyboardMarkup(inline_keyboard=rows)
 
-        def sales_menu_kb():
-            return InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [InlineKeyboardButton(text="🧾 Товарный чек", callback_data="receipt:menu")],
-                    [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")],
-                ]
-            )
+        def sales_menu_kb(u: dict):
+            rows = []
+            if _access_allowed(u, "sales.receipt"):
+                rows.append([InlineKeyboardButton(text="🧾 Товарный чек", callback_data="receipt:menu")])
+            rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")])
+            return InlineKeyboardMarkup(inline_keyboard=rows)
 
-        def external_tables_menu_kb():
-            return InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [InlineKeyboardButton(text="🔄 Обновить Google таблицу", callback_data="update_gsheet")],
-                    [InlineKeyboardButton(text="📊 Цены конкурентов", callback_data="competitors")],
-                    [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")],
-                ]
-            )
+        def external_tables_menu_kb(u: dict):
+            rows = []
+            if _access_allowed(u, "external.update_gsheet"):
+                rows.append([InlineKeyboardButton(text="🔄 Обновить Google таблицу", callback_data="update_gsheet")])
+            if _access_allowed(u, "external.competitors"):
+                rows.append([InlineKeyboardButton(text="📊 Цены конкурентов", callback_data="competitors")])
+            rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")])
+            return InlineKeyboardMarkup(inline_keyboard=rows)
 
-        def settings_menu_kb():
-            return InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [InlineKeyboardButton(text="🔐 Авторизация", callback_data="auth:menu")],
-                    [InlineKeyboardButton(text="📡 Источники", callback_data="sources")],
-                    [InlineKeyboardButton(text="🤖 Автоответы", callback_data="auto_replies")],
-                    [InlineKeyboardButton(text="👤 Аккаунты", callback_data="accounts")],
-                    [InlineKeyboardButton(text="🗂 Управление каналами", callback_data="cm:open")],
-                    [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")],
-                ]
-            )
+        def settings_menu_kb(u: dict):
+            rows = []
+            if _access_allowed(u, "settings.auth"):
+                rows.append([InlineKeyboardButton(text="🔐 Авторизация", callback_data="auth:menu")])
+            if _access_allowed(u, "settings.sources"):
+                mode = u.get("sources_mode", "default")
+                if u.get("role") == "admin" or mode in ("own", "custom"):
+                    rows.append([InlineKeyboardButton(text="📡 Источники", callback_data="sources")])
+            if _access_allowed(u, "settings.auto_replies"):
+                rows.append([InlineKeyboardButton(text="🤖 Автоответы", callback_data="auto_replies")])
+            if _access_allowed(u, "settings.accounts"):
+                rows.append([InlineKeyboardButton(text="👤 Аккаунты", callback_data="accounts")])
+            if _access_allowed(u, "settings.cm"):
+                rows.append([InlineKeyboardButton(text="🗂 Управление каналами", callback_data="cm:open")])
+            rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")])
+            return InlineKeyboardMarkup(inline_keyboard=rows)
 
         # === /start (авторизация) ===
         @dp.message(CommandStart())
@@ -359,10 +387,10 @@ def run_bot():
             if role in ("pending", "rejected"):
                 await callback.message.answer(PENDING_TEXT)
                 return
-            if not _access_allowed(u, "menu_products"):
+            if not _any_access(u, ["products.catalog", "products.collect", "products.view_prices"]):
                 await callback.answer("⛔️ Нет доступа", show_alert=True)
                 return
-            await callback.message.answer("Товары и цены:", reply_markup=products_menu_kb())
+            await callback.message.answer("Товары и цены:", reply_markup=products_menu_kb(u))
 
         @dp.callback_query(F.data == "menu:sales")
         async def open_sales_menu(callback: CallbackQuery):
@@ -374,10 +402,10 @@ def run_bot():
             if role in ("pending", "rejected"):
                 await callback.message.answer(PENDING_TEXT)
                 return
-            if not _access_allowed(u, "menu_sales"):
+            if not _access_allowed(u, "sales.receipt"):
                 await callback.answer("⛔️ Нет доступа", show_alert=True)
                 return
-            await callback.message.answer("Продажи:", reply_markup=sales_menu_kb())
+            await callback.message.answer("Продажи:", reply_markup=sales_menu_kb(u))
 
         @dp.callback_query(F.data == "menu:external")
         async def open_external_menu(callback: CallbackQuery):
@@ -389,10 +417,10 @@ def run_bot():
             if role in ("pending", "rejected"):
                 await callback.message.answer(PENDING_TEXT)
                 return
-            if not _access_allowed(u, "menu_external"):
+            if not _any_access(u, ["external.update_gsheet", "external.competitors"]):
                 await callback.answer("⛔️ Нет доступа", show_alert=True)
                 return
-            await callback.message.answer("Внешние таблицы:", reply_markup=external_tables_menu_kb())
+            await callback.message.answer("Внешние таблицы:", reply_markup=external_tables_menu_kb(u))
 
         @dp.callback_query(F.data == "menu:settings")
         async def open_settings_menu(callback: CallbackQuery):
@@ -404,10 +432,13 @@ def run_bot():
             if role in ("pending", "rejected"):
                 await callback.message.answer(PENDING_TEXT)
                 return
-            if not _access_allowed(u, "menu_settings"):
+            settings_keys = ["settings.auth", "settings.auto_replies", "settings.accounts", "settings.cm"]
+            if u.get("role") == "admin" or u.get("sources_mode") in ("own", "custom"):
+                settings_keys.append("settings.sources")
+            if not _any_access(u, settings_keys):
                 await callback.answer("⛔️ Нет доступа", show_alert=True)
                 return
-            await callback.message.answer("Настройки:", reply_markup=settings_menu_kb())
+            await callback.message.answer("Настройки:", reply_markup=settings_menu_kb(u))
 
         # =====================================================
         # === Кнопка «Обновить Google таблицу» ===
@@ -417,8 +448,10 @@ def run_bot():
                 remember_user(callback.from_user)
 
             if not await is_admin(callback.from_user.id):
-                await callback.answer("⛔️ Только для админов", show_alert=True)
-                return
+                u = await auth_get(callback.from_user.id)
+                if not _access_allowed(u, "external.update_gsheet"):
+                    await callback.answer("⛔️ Нет доступа", show_alert=True)
+                    return
 
             await callback.answer()
             msg = await callback.message.answer("⏳ Обновляю Google-таблицу…")
@@ -622,8 +655,12 @@ def run_bot():
             )
             role_txt = role_label(new_role)
             back_role = target.get("role", "user")
-            use_default_sources = target.get("use_default_sources", True)
-            sources_label = "✅ По умолчанию" if use_default_sources else "❌ Только свои"
+            sources_mode = target.get("sources_mode", "default")
+            sources_label = {
+                "default": "✅ По умолчанию",
+                "own": "👤 Только свои",
+                "custom": "➕ Кастом",
+            }.get(sources_mode, "✅ По умолчанию")
             return InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text=f"🔁 Роль: {role_txt}", callback_data=f"auth:toggle_edit:{target['id']}")],
                 [InlineKeyboardButton(text="🔐 Доступы", callback_data=f"auth:access:{target['id']}")],
@@ -708,13 +745,15 @@ def run_bot():
         def kb_access_edit(target: dict):
             access = target.get("access") or {}
             rows = []
-            for key, label in ACCESS_OPTIONS:
-                enabled = bool(access.get(key))
-                mark = "✅" if enabled else "❌"
-                rows.append([InlineKeyboardButton(
-                    text=f"{mark} {label}",
-                    callback_data=f"auth:access_toggle:{target['id']}:{key}",
-                )])
+            for group_name, items in ACCESS_GROUPS:
+                rows.append([InlineKeyboardButton(text=f"— {group_name} —", callback_data="noop")])
+                for key, label in items:
+                    enabled = bool(access.get(key))
+                    mark = "✅" if enabled else "❌"
+                    rows.append([InlineKeyboardButton(
+                        text=f"{mark} {label}",
+                        callback_data=f"auth:access_toggle:{target['id']}:{key}",
+                    )])
             rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"auth:edit:{target['id']}")])
             return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -749,7 +788,7 @@ def run_bot():
             if not target:
                 await callback.answer("Не найден", show_alert=True)
                 return
-            valid_keys = {k for k, _ in ACCESS_OPTIONS}
+            valid_keys = {k for _, items in ACCESS_GROUPS for k, _ in items}
             if key not in valid_keys:
                 await callback.answer("Неизвестный доступ", show_alert=True)
                 return
@@ -759,15 +798,19 @@ def run_bot():
             await callback.message.edit_reply_markup(reply_markup=kb_access_edit(target))
 
         def kb_sources_cfg(target: dict):
-            use_default = bool(target.get("use_default_sources", True))
+            mode = target.get("sources_mode", "default")
             rows = [
                 [InlineKeyboardButton(
-                    text=f"{'✅' if use_default else '❌'} Использовать данные по умолчанию",
-                    callback_data=f"auth:sources_set:{target['id']}:1",
+                    text=f"{'✅' if mode == 'default' else '❌'} По умолчанию",
+                    callback_data=f"auth:sources_set:{target['id']}:default",
                 )],
                 [InlineKeyboardButton(
-                    text=f"{'✅' if not use_default else '❌'} Не использовать данные по умолчанию",
-                    callback_data=f"auth:sources_set:{target['id']}:0",
+                    text=f"{'✅' if mode == 'own' else '❌'} Только свои",
+                    callback_data=f"auth:sources_set:{target['id']}:own",
+                )],
+                [InlineKeyboardButton(
+                    text=f"{'✅' if mode == 'custom' else '❌'} Кастом (наши + свои)",
+                    callback_data=f"auth:sources_set:{target['id']}:custom",
                 )],
                 [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"auth:edit:{target['id']}")],
             ]
@@ -799,12 +842,15 @@ def run_bot():
                 await callback.answer("Неверные данные", show_alert=True)
                 return
             target_id = int(parts[2])
-            value = parts[3] == "1"
+            value = parts[3]
             target = await auth_get(target_id)
             if not target:
                 await callback.answer("Не найден", show_alert=True)
                 return
-            await auth_set_use_default_sources(target_id, value)
+            if value not in ("default", "own", "custom"):
+                await callback.answer("Неверный режим", show_alert=True)
+                return
+            await auth_set_sources_mode(target_id, value)
             target = await auth_get(target_id)
             await callback.answer("Обновлено")
             await callback.message.edit_reply_markup(reply_markup=kb_sources_cfg(target))
