@@ -128,7 +128,7 @@ async def try_auto_finalize_paid(msg: Message, state: FSMContext) -> bool:
     if paid.get("status") == "ready":
         return False
     api_id = paid.get("api_id")
-    api_hash = paid.get("api_hash")
+    api_hash = (paid.get("api_hash") or "").strip()
     session_path = paid.get("session") or str(PAID_SESSIONS_DIR / f"{msg.from_user.id}.session")
     if not api_id or not api_hash:
         return False
@@ -167,7 +167,7 @@ async def paid_reg_api_id(msg: Message, state: FSMContext):
     if not api_id.isdigit():
         await msg.answer("⚠️ API_ID должен быть числом. Введи ещё раз:", reply_markup=_cancel_kb())
         return
-    await state.update_data(api_id=api_id)
+    await state.update_data(api_id=int(api_id))
     await state.set_state(PaidRegistrationStates.waiting_for_api_hash)
     await msg.answer("🔑 Введи API_HASH:", reply_markup=_cancel_kb())
 
@@ -180,7 +180,7 @@ async def paid_reg_api_hash(msg: Message, state: FSMContext):
     if not api_hash:
         await msg.answer("⚠️ API_HASH не может быть пустым. Введи ещё раз:", reply_markup=_cancel_kb())
         return
-    await state.update_data(api_hash=api_hash)
+    await state.update_data(api_hash=api_hash.strip())
     # если сессия уже есть и авторизована — завершаем без кода/QR
     session_path = PAID_SESSIONS_DIR / f"{msg.from_user.id}.session"
     if session_path.exists():
@@ -228,13 +228,13 @@ async def paid_reg_method(callback: CallbackQuery, state: FSMContext):
         return
     if method == "qr":
         api_id = data["api_id"]
-        api_hash = data["api_hash"]
+        api_hash = (data["api_hash"] or "").strip()
         tfa_password = data.get("tfa_password") or ""
         session_path = PAID_SESSIONS_DIR / f"{callback.from_user.id}.session"
         lock = _paid_lock(callback.from_user.id)
         async with lock:
             await _disconnect_client(state)
-            client = TelegramClient(session_path, api_id, api_hash)
+            client = TelegramClient(session_path, int(api_id), api_hash)
             await client.connect()
             pending = {
                 "name": f"paid_{callback.from_user.id}",
@@ -267,7 +267,10 @@ async def paid_reg_method(callback: CallbackQuery, state: FSMContext):
                         await _disconnect_client(state)
                         return
                 else:
-                    await callback.message.answer(f"❌ Не удалось создать QR: {e}")
+                    msg = f"❌ Не удалось создать QR: {e}"
+                    if "api_id" in str(e).lower() and "api_hash" in str(e).lower():
+                        msg += "\nПроверь, что API_ID/API_HASH из my.telegram.org и введены без ошибок."
+                    await callback.message.answer(msg)
                     await state.clear()
                     await _disconnect_client(state)
                     return
@@ -306,10 +309,10 @@ async def paid_reg_phone(msg: Message, state: FSMContext):
     phone = (msg.text or "").strip()
     data = await state.get_data()
     api_id = data["api_id"]
-    api_hash = data["api_hash"]
+    api_hash = (data["api_hash"] or "").strip()
 
     session_path = PAID_SESSIONS_DIR / f"{msg.from_user.id}.session"
-    client = TelegramClient(session_path, api_id, api_hash)
+    client = TelegramClient(session_path, int(api_id), api_hash)
 
     await client.connect()
     try:
@@ -394,9 +397,9 @@ async def paid_reg_qr_check(callback: CallbackQuery, state: FSMContext):
     async with lock:
         if client is None:
             api_id = data.get("api_id")
-            api_hash = data.get("api_hash")
+            api_hash = (data.get("api_hash") or "").strip()
             session_path = PAID_SESSIONS_DIR / f"{callback.from_user.id}.session"
-            client = TelegramClient(session_path, api_id, api_hash)
+            client = TelegramClient(session_path, int(api_id), api_hash)
             await client.connect()
             await state.update_data(client=client)
     print(f"🔎 QR check start: user_id={callback.from_user.id}")
