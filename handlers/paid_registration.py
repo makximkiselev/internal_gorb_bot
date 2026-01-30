@@ -6,6 +6,7 @@ from aiogram.types import CallbackQuery, Message, InlineKeyboardMarkup, InlineKe
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 from telethon import TelegramClient
+from telethon.tl.types import LoginTokenSuccess
 from pathlib import Path
 from urllib.parse import quote
 import asyncio
@@ -364,11 +365,23 @@ async def paid_reg_qr_new(callback: CallbackQuery, state: FSMContext):
         return
     await callback.answer()
     try:
+        if await client.is_user_authorized():
+            await _finish_paid_auth(callback.message, state)
+            return
+    except Exception:
+        pass
+    try:
         qr = await client.qr_login()
     except Exception as e:
         await callback.message.answer(f"❌ Не удалось создать QR: {e}")
         await state.clear()
         return
+    try:
+        if isinstance(getattr(qr, "_resp", None), LoginTokenSuccess):
+            await _finish_paid_auth(callback.message, state)
+            return
+    except Exception:
+        pass
     await state.update_data(qr=qr)
     img_url = _qr_image_url(qr.url)
     await callback.message.answer_photo(
