@@ -478,6 +478,9 @@ def _kb_branch(path: List[str], token: str, children_keys: List[str], page: int)
             nav.append(InlineKeyboardButton(text="▶️", callback_data=f"vp:go:{token}:{page+1}"))
         rows.append(nav)
 
+    # “Посмотреть цены” внутри раздела
+    rows.append([InlineKeyboardButton(text="👀 Посмотреть цены", callback_data=f"vp:all:{token}:0")])
+
     # navigation bottom
     if path:
         back_tok = _cache_put(path[:-1])
