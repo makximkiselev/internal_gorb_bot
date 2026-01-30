@@ -168,6 +168,15 @@ def _breadcrumb(path: List[str]) -> str:
     return " / ".join(["📚 Каталог"] + path)
 
 
+def _has_any_price(node: Any) -> bool:
+    if isinstance(node, dict):
+        if "min_price" in node and node.get("min_price") is not None:
+            return True
+        return any(_has_any_price(v) for v in node.values())
+    if isinstance(node, list):
+        return False
+    return False
+
 def _norm_key(s: str) -> str:
     s = (s or "").strip().lower()
     s = s.replace("\u00A0", " ")
@@ -443,6 +452,9 @@ async def cmd_prices(message: Message):
         await message.answer("⛔️ Нет доступа")
         return
     data = _ensure_parsed_data(_parsed_data_path_for_user(u))
+    if (u or {}).get("role") == "paid_user" and (u or {}).get("sources_mode") in ("own", "custom"):
+        if not _has_any_price(data.get("catalog")):
+            await message.answer("⚠️ Цены пустые. Добавь источники и запусти «Собрать цены».")
     root = _get_catalog_root(data)
     children = list(root.keys())  # order as in JSON
     await message.answer(_render_branch_text([]), reply_markup=_kb_home(children))
@@ -456,6 +468,9 @@ async def cb_open_prices(callback: CallbackQuery):
         await callback.answer("⛔️ Нет доступа", show_alert=True)
         return
     data = _ensure_parsed_data(_parsed_data_path_for_user(u))
+    if (u or {}).get("role") == "paid_user" and (u or {}).get("sources_mode") in ("own", "custom"):
+        if not _has_any_price(data.get("catalog")):
+            await callback.message.answer("⚠️ Цены пустые. Добавь источники и запусти «Собрать цены».")
     root = _get_catalog_root(data)
     children = list(root.keys())
     await callback.message.edit_text(_render_branch_text([]), reply_markup=_kb_home(children))

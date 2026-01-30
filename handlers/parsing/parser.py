@@ -104,6 +104,13 @@ async def collect_all(callback: CallbackQuery):
     if u.get("role") != "admin" and u.get("sources_mode") == "default":
         await callback.message.answer("⛔️ В режиме 'По умолчанию' сбор своих цен недоступен.")
         return
+    sources_mode = (u or {}).get("sources_mode", "default")
+    sources_pack, _sources_path = _load_sources_from_file()
+    sources_pack = _filter_sources_for_user(sources_pack, None if u.get("role") == "admin" else callback.from_user.id, sources_mode)
+    has_sources = bool((sources_pack.get("channels") or []) or (sources_pack.get("bots") or []))
+    if not has_sources:
+        await callback.message.answer("⚠️ Источники не добавлены. Добавь каналы/ботов в «Настройки → Источники».")
+        return
     if u.get("role") == "admin":
         set_parsing_data_dir(DEFAULT_BASE_DIR)
     else:
@@ -123,7 +130,6 @@ async def collect_all(callback: CallbackQuery):
     if (u or {}).get("role") == "admin":
         messages, stats_sources = await collect_messages()
     else:
-        sources_mode = (u or {}).get("sources_mode", "default")
         messages, stats_sources = await collect_messages(user_id=callback.from_user.id, sources_mode=sources_mode)
 
     # --- errors per source (collect stage) ---
