@@ -170,6 +170,15 @@ async def collect_all(callback: CallbackQuery):
             lines += f"\n…и ещё <b>{tail}</b> источн."
         zeros_block = f"\n\n<b>Без сообщений:</b>\n{lines}"
 
+    if not messages:
+        await callback.message.answer(
+            "⚠️ Сообщений для парсинга не найдено."
+            + errors_block
+            + zeros_block,
+            reply_markup=collect_menu_keyboard(),
+        )
+        return
+
     # ✅ ДО парсинга: если шапка одинаковая — оставляем только самое новое сообщение
     messages = dedupe_messages_by_header_keep_latest(messages)
 
