@@ -1369,6 +1369,7 @@ async def cm_hide_one(cb: CallbackQuery):
     _u, _reg, ch = await _get_channel_for_cb(cb, ch_id)
     if not ch:
         return
+    await cb.answer("Скрываю…")
 
     if ch.get("type") != "opt":
         await cb.answer("Скрытие доступно только для оптовых каналов", show_alert=True)
@@ -1388,7 +1389,9 @@ async def cm_hide_one(cb: CallbackQuery):
         if "message is not modified" in str(e).lower():
             pass
         else:
-            raise
+            await cb.message.answer(msg, reply_markup=InlineKeyboardMarkup(inline_keyboard=_kb_channel(ch)))
+    except Exception:
+        await cb.message.answer(msg, reply_markup=InlineKeyboardMarkup(inline_keyboard=_kb_channel(ch)))
 
 
 @router.callback_query(F.data.startswith("cm:hide_menu:"))
