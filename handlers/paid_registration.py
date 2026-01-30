@@ -323,12 +323,24 @@ async def paid_reg_qr_check(callback: CallbackQuery, state: FSMContext):
     print(f"🔎 QR check start: user_id={callback.from_user.id}")
     await callback.answer("Проверяю вход...")
     try:
+        if await client.is_user_authorized():
+            await _finish_paid_auth(callback.message, state)
+            return
+    except Exception:
+        pass
+    try:
         print("🔎 QR wait...")
         await asyncio.wait_for(qr.wait(), timeout=60)
         print("✅ QR wait completed")
     except asyncio.TimeoutError:
         print("⏳ QR wait timeout")
-        await callback.message.answer("⏳ Вход ещё не подтверждён. Отсканируй QR и нажми ещё раз.")
+        try:
+            if await client.is_user_authorized():
+                await _finish_paid_auth(callback.message, state)
+                return
+        except Exception:
+            pass
+        await callback.message.answer("⏳ Вход ещё не подтверждён. Если QR устарел — нажми «Новый QR».")
         return
     except Exception as e:
         print(f"❌ QR wait error: {e}")
