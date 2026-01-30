@@ -223,11 +223,9 @@ def run_bot():
             # 👤 Обычный пользователь: только "Посмотреть цены"
             if role != "admin":
                 rows = []
-                if _access_allowed(u, "main.view_prices"):
-                    rows.append([InlineKeyboardButton(text="👁 Посмотреть цены", callback_data="view_prices")])
                 if _access_allowed(u, "main.send_request"):
                     rows.append([InlineKeyboardButton(text="📨 Отправить запрос", callback_data="send_request")])
-                if _any_access(u, ["products.catalog", "products.collect"]):
+                if _any_access(u, ["products.catalog", "products.collect", "main.view_prices"]):
                     rows.append([InlineKeyboardButton(text="🧾 Товары и цены", callback_data="menu:products")])
                 if _access_allowed(u, "sales.receipt"):
                     rows.append([InlineKeyboardButton(text="💰 Продажи", callback_data="menu:sales")])
@@ -239,7 +237,7 @@ def run_bot():
                 if _any_access(u, settings_keys):
                     rows.append([InlineKeyboardButton(text="⚙️ Настройки", callback_data="menu:settings")])
                 if not rows:
-                    rows = [[InlineKeyboardButton(text="👁 Посмотреть цены", callback_data="view_prices")]]
+                    rows = [[InlineKeyboardButton(text="🧾 Товары и цены", callback_data="menu:products")]]
                 return InlineKeyboardMarkup(inline_keyboard=rows)
 
             # 🛡 Админ: новое главное меню (структурированное)
@@ -261,12 +259,12 @@ def run_bot():
 
         ACCESS_GROUPS = [
             ("Главное меню", [
-                ("main.view_prices", "👁 Посмотреть цены"),
                 ("main.send_request", "📨 Отправить запрос"),
             ]),
             ("Товары и цены", [
                 ("products.catalog", "🛠 Каталог"),
                 ("products.collect", "🏷 Собрать цены"),
+                ("main.view_prices", "👁 Посмотреть цены"),
             ]),
             ("Продажи", [
                 ("sales.receipt", "🧾 Товарный чек"),
@@ -290,6 +288,8 @@ def run_bot():
                 rows.append([InlineKeyboardButton(text="🛠 Каталог", callback_data="catalog_menu")])
             if _access_allowed(u, "products.collect"):
                 rows.append([InlineKeyboardButton(text="🏷 Собрать цены", callback_data="collect")])
+            if _access_allowed(u, "main.view_prices"):
+                rows.append([InlineKeyboardButton(text="👁 Посмотреть цены", callback_data="view_prices")])
             rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")])
             return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -384,7 +384,7 @@ def run_bot():
             if role in ("pending", "rejected"):
                 await callback.message.answer(PENDING_TEXT)
                 return
-            if not _any_access(u, ["products.catalog", "products.collect"]):
+            if not _any_access(u, ["products.catalog", "products.collect", "main.view_prices"]):
                 await callback.answer("⛔️ Нет доступа", show_alert=True)
                 return
             await callback.message.answer("Товары и цены:", reply_markup=products_menu_kb(u))
