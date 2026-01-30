@@ -36,26 +36,37 @@ PENDING_TEXT = (
 def _auth_default() -> dict:
     return {"version": 1, "users": {}}
 
-def _default_access() -> dict:
-    return {
-        "main.view_prices": True,
-        "main.send_request": True,
-        "products.catalog": True,
-        "products.collect": True,
-        "sales.receipt": True,
-        "external.update_gsheet": True,
-        "external.competitors": True,
-        "settings.auth": True,
-        "settings.sources": True,
-        "settings.auto_replies": True,
-        "settings.accounts": True,
-        "settings.cm": True,
-    }
+_ACCESS_KEYS = [
+    "main.view_prices",
+    "main.send_request",
+    "products.catalog",
+    "products.collect",
+    "sales.receipt",
+    "external.update_gsheet",
+    "external.competitors",
+    "settings.auth",
+    "settings.sources",
+    "settings.auto_replies",
+    "settings.accounts",
+    "settings.cm",
+]
+
+
+def _default_access(role: str | None = None) -> dict:
+    if role == "paid_user":
+        access = {k: False for k in _ACCESS_KEYS}
+        access["main.send_request"] = True
+        access["main.view_prices"] = True
+        access["products.collect"] = True
+        access["settings.cm"] = True
+        return access
+    # default behavior (admin/user) — full access
+    return {k: True for k in _ACCESS_KEYS}
 
 def _default_sources_mode() -> str:
     return "default"
 
-def _normalize_access(access: dict | None) -> dict:
+def _normalize_access(access: dict | None, role: str | None = None) -> dict:
     if not isinstance(access, dict):
         access = {}
 
@@ -83,7 +94,7 @@ def _normalize_access(access: dict | None) -> dict:
         access.setdefault("settings.accounts", True)
         access.setdefault("settings.cm", True)
 
-    defaults = _default_access()
+    defaults = _default_access(role)
     for k, v in defaults.items():
         access.setdefault(k, v)
     return access
@@ -125,7 +136,7 @@ async def auth_upsert_user(tg_user: Any, role_if_new: str = "pending") -> dict:
             "last_name": getattr(tg_user, "last_name", None),
             "role": role_if_new,  # pending/user/admin/rejected
             "paid_account": None,
-            "access": _default_access(),
+        "access": _default_access(role_if_new),
             "sources_mode": _default_sources_mode(),
         }
         await auth_save(doc)
@@ -137,7 +148,7 @@ async def auth_upsert_user(tg_user: Any, role_if_new: str = "pending") -> dict:
     u["first_name"] = getattr(tg_user, "first_name", None)
     u["last_name"] = getattr(tg_user, "last_name", None)
     u.setdefault("paid_account", None)
-    u["access"] = _normalize_access(u.get("access"))
+    u["access"] = _normalize_access(u.get("access"), u.get("role"))
     u.setdefault("sources_mode", _default_sources_mode())
     await auth_save(doc)
     return u
@@ -171,7 +182,8 @@ async def auth_toggle_access(user_id: int, key: str) -> Optional[dict]:
     users = doc.setdefault("users", {})
     if uid not in users:
         return None
-    access = users[uid].setdefault("access", _default_access())
+    role = users[uid].get("role")
+    access = users[uid].setdefault("access", _default_access(role))
     access[key] = not bool(access.get(key))
     await auth_save(doc)
     return users[uid]
@@ -194,7 +206,7 @@ async def auth_get(user_id: int) -> Optional[dict]:
     if not u:
         return None
     changed = False
-    u["access"] = _normalize_access(u.get("access"))
+    u["access"] = _normalize_access(u.get("access"), u.get("role"))
     if "sources_mode" not in u:
         if "use_default_sources" in u:
             u["sources_mode"] = "default" if u.get("use_default_sources") else "own"
@@ -213,6 +225,8 @@ async def auth_set_role(user_id: int, role: str) -> Optional[dict]:
     if uid not in users:
         return None
     users[uid]["role"] = role
+    if role == "paid_user":
+        users[uid]["access"] = _default_access("paid_user")
     await auth_save(doc)
     return users[uid]
 
