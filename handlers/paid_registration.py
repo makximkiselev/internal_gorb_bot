@@ -6,7 +6,6 @@ from aiogram.types import CallbackQuery, Message, InlineKeyboardMarkup, InlineKe
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 from telethon import TelegramClient
-from telethon.tl.types import LoginTokenSuccess
 from pathlib import Path
 from urllib.parse import quote
 import asyncio
@@ -377,7 +376,8 @@ async def paid_reg_qr_new(callback: CallbackQuery, state: FSMContext):
         await state.clear()
         return
     try:
-        if isinstance(getattr(qr, "_resp", None), LoginTokenSuccess):
+        resp = getattr(qr, "_resp", None)
+        if resp is not None and resp.__class__.__name__ == "LoginTokenSuccess":
             await _finish_paid_auth(callback.message, state)
             return
     except Exception:
