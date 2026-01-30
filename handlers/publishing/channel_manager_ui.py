@@ -321,13 +321,13 @@ def _kb_channel(ch: dict):
 
     rows = [
         [InlineKeyboardButton(text="🔄 Обновить цены", callback_data=f"cm:update:{ch['id']}")],
-        [InlineKeyboardButton(text="🙈 Скрыть цены (.)", callback_data=f"cm:hide:{ch['id']}")],
+        [InlineKeyboardButton(text="🙈 Скрытие цен", callback_data=f"cm:hide_menu:{ch['id']}")],
         [InlineKeyboardButton(text="📂 Что публиковать", callback_data=f"cm:publish:{ch['id']}")],
         [InlineKeyboardButton(text="✏️ Финальное сообщение", callback_data=f"cm:final:{ch['id']}")],
     ]
 
     if t != "opt":
-        rows = [r for r in rows if "cm:hide:" not in r[0].callback_data]
+        rows = [r for r in rows if "cm:hide_menu:" not in r[0].callback_data]
         rows.append([InlineKeyboardButton(text="🖼 Добавить картинки", callback_data=f"cm:images:{ch['id']}")])
 
     rows += [
@@ -383,6 +383,10 @@ class AddChannelStates(StatesGroup):
 # ---------- Final message (FSM) ----------
 class FinalMessageStates(StatesGroup):
     waiting_for_text = State()
+
+
+class HideTimeStates(StatesGroup):
+    waiting_for_time = State()
 
 
 _USERNAME_RE = re.compile(r"(?i)^(?:@|https?://t\.me/)(?P<u>[a-z0-9_]{5,})$")
@@ -1387,6 +1391,85 @@ async def cm_hide_one(cb: CallbackQuery):
             raise
 
 
+@router.callback_query(F.data.startswith("cm:hide_menu:"))
+async def cm_hide_menu(cb: CallbackQuery):
+    ch_id = cb.data.split(":")[-1]
+    _u, _reg, ch = await _get_channel_for_cb(cb, ch_id)
+    if not ch:
+        return
+    if ch.get("type") != "opt":
+        await cb.answer("Скрытие доступно только для оптовых каналов", show_alert=True)
+        return
+    ht = ch.get("hide_time") or "20:00"
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🙈 Скрыть сейчас", callback_data=f"cm:hide:{ch_id}")],
+            [InlineKeyboardButton(text=f"⏰ Время скрытия: {ht}", callback_data=f"cm:hide_time:{ch_id}")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"cm:view:{ch_id}")],
+        ]
+    )
+    await cb.message.edit_text("🙈 Скрытие цен", reply_markup=kb)
+
+
+@router.callback_query(F.data.startswith("cm:hide_time:"))
+async def cm_hide_time_start(cb: CallbackQuery, state: FSMContext):
+    ch_id = cb.data.split(":")[-1]
+    _u, _reg, ch = await _get_channel_for_cb(cb, ch_id)
+    if not ch:
+        return
+    if ch.get("type") != "opt":
+        await cb.answer("Скрытие доступно только для оптовых каналов", show_alert=True)
+        return
+    await state.set_state(HideTimeStates.waiting_for_time)
+    await state.update_data(ch_id=ch_id)
+    await cb.message.edit_text(
+        "Введите время скрытия в формате HH:MM (МСК), например <code>20:00</code>.",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"cm:hide_menu:{ch_id}")]]
+        ),
+    )
+
+
+@router.message(HideTimeStates.waiting_for_time)
+async def cm_hide_time_save(msg: Message, state: FSMContext):
+    data = await state.get_data()
+    ch_id = data.get("ch_id")
+    if not ch_id:
+        await state.clear()
+        await msg.answer("Канал не найден. Откройте меню снова.")
+        return
+    u = await auth_get(msg.from_user.id)
+    access = (u or {}).get("access") or {}
+    if not u or not (u.get("role") == "admin" or access.get("settings.cm")):
+        await state.clear()
+        await msg.answer("⛔️ Нет доступа")
+        return
+    reg = _get_registry()
+    ch = reg.get(str(ch_id)) or reg.get(ch_id)
+    if not ch:
+        await state.clear()
+        await msg.answer("Канал не найден. Откройте меню снова.")
+        return
+    if u.get("role") != "admin" and not _is_owner(ch, msg.from_user.id):
+        await state.clear()
+        await msg.answer("⛔️ Нет доступа")
+        return
+
+    text = (msg.text or "").strip()
+    m = re.fullmatch(r"([01]?\d|2[0-3]):([0-5]\d)", text)
+    if not m:
+        await msg.answer("⚠️ Неверный формат. Введите время как HH:MM (например 20:00).")
+        return
+    hh, mm = m.group(1), m.group(2)
+    ch["hide_time"] = f"{int(hh):02d}:{mm}"
+    _save_registry(reg)
+    await state.clear()
+    await msg.answer("✅ Время скрытия сохранено.", reply_markup=InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"cm:hide_menu:{ch_id}")]]
+    ))
+
+
 # --- Обновление всех каналов ---
 @router.callback_query(F.data == "cm:update_all")
 async def cm_update_all(cb: CallbackQuery):
@@ -1468,24 +1551,25 @@ async def schedule_daily_opt_hide(client):
     """
     while True:
         now = datetime.now(MOSCOW_TZ)
-        next_hide = now.replace(hour=20, minute=0, second=0, microsecond=0)
-        if next_hide <= now:
-            next_hide += timedelta(days=1)
-
-        await asyncio.sleep((next_hide - now).total_seconds())
+        await asyncio.sleep(30)
 
         reg = _get_registry()
-        today = datetime.now(MOSCOW_TZ).date().isoformat()
+        today = now.date().isoformat()
+        cur_hm = now.strftime("%H:%M")
 
         for ch_id, ch in list(reg.items()):
             if ch.get("type") != "opt":
                 continue
-            if ch.get("last_hide_date") == today:
+            ht = (ch.get("hide_time") or "20:00").strip()
+            if ht != cur_hm:
+                continue
+            last = ch.get("last_hide_at")
+            if last == f"{today} {cur_hm}":
                 continue
             try:
                 target = _make_channel_ref(ch_id, ch)
                 await hide_opt_models(_get_client(), target, channel_mode="opt")
-                ch["last_hide_date"] = today
+                ch["last_hide_at"] = f"{today} {cur_hm}"
                 _save_registry(reg)
             except Exception:
                 continue
