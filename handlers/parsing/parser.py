@@ -1164,9 +1164,6 @@ def _filter_sources_for_user(
     user_id: int | None,
     sources_mode: str,
 ) -> Dict[str, List[Dict[str, Any]]]:
-    if user_id is None:
-        return sources_pack
-
     def _is_own(item: dict) -> bool:
         return item.get("user_id") == user_id
 
@@ -1176,6 +1173,11 @@ def _filter_sources_for_user(
     channels = sources_pack.get("channels", []) or []
     bots = sources_pack.get("bots", []) or []
 
+    if user_id is None:
+        return {
+            "channels": [s for s in channels if _is_default(s)],
+            "bots": [s for s in bots if _is_default(s)],
+        }
     if sources_mode == "default":
         return {
             "channels": [s for s in channels if _is_default(s)],
@@ -1212,7 +1214,7 @@ async def _clients_map(user_id: int | None = None, include_default: bool = True)
     return out
 
 
-def _pick_client_for_source(clients: Dict[str, Any], src: Dict[str, Any]) -> Optional[Any]:
+def _pick_client_for_source(clients: Dict[str, Any], src: Dict[str, Any], *, allow_fallback: bool = True) -> Optional[Any]:
     """
     ✅ КАК БЫЛО:
     src["account"] матчится по ключу в clients (и "@account" тоже)
@@ -1227,6 +1229,8 @@ def _pick_client_for_source(clients: Dict[str, Any], src: Dict[str, Any]) -> Opt
         if c:
             return c
 
+    if not allow_fallback:
+        return None
     return next(iter(clients.values()), None)
 
 
@@ -1370,7 +1374,8 @@ async def collect_messages(
             "sources_path": str(sources_path) if sources_path else None,
         }
 
-    clients = await _clients_map(user_id=user_id, include_default=(sources_mode == "default"))
+    include_default = (user_id is None) or (sources_mode == "default")
+    clients = await _clients_map(user_id=user_id, include_default=include_default)
     if not clients:
         return [], {
             "total": 0,
@@ -1402,7 +1407,7 @@ async def collect_messages(
             stats["per_source"].append({"source": title, "ok": False, "error": "no_entity_ref"})
             return
 
-        client = _pick_client_for_source(clients, src)
+        client = _pick_client_for_source(clients, src, allow_fallback=include_default)
         if not client:
             stats["errors"] += 1
             stats["per_source"].append({"source": title, "ok": False, "error": "no_client"})
