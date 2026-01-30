@@ -17,6 +17,16 @@ router = Router()
 PAID_SESSIONS_DIR = Path("sessions") / "paid"
 PAID_SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
 
+_PAID_LOCKS: dict[int, asyncio.Lock] = {}
+
+
+def _paid_lock(user_id: int) -> asyncio.Lock:
+    lock = _PAID_LOCKS.get(user_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _PAID_LOCKS[user_id] = lock
+    return lock
+
 
 class PaidRegistrationStates(StatesGroup):
     waiting_for_api_id = State()
@@ -62,6 +72,23 @@ def _reset_paid_session(user_id: int) -> None:
     session_path = PAID_SESSIONS_DIR / f"{user_id}.session"
     if session_path.exists():
         session_path.unlink()
+    for suffix in (".session-journal", ".session-wal", ".session-shm"):
+        p = PAID_SESSIONS_DIR / f"{user_id}{suffix}"
+        if p.exists():
+            try:
+                p.unlink()
+            except Exception:
+                pass
+
+
+async def _disconnect_client(state: FSMContext) -> None:
+    data = await state.get_data()
+    client: TelegramClient | None = data.get("client")
+    if client:
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
 
 
 async def _ensure_paid_user(msg: Message, state: FSMContext) -> bool:
@@ -91,8 +118,43 @@ async def start_paid_registration(msg: Message, state: FSMContext) -> None:
     )
 
 
+async def try_auto_finalize_paid(msg: Message, state: FSMContext) -> bool:
+    u = await auth_get(msg.from_user.id)
+    if not u:
+        return False
+    paid = u.get("paid_account") or {}
+    if not isinstance(paid, dict):
+        return False
+    if paid.get("status") == "ready":
+        return False
+    api_id = paid.get("api_id")
+    api_hash = paid.get("api_hash")
+    session_path = paid.get("session") or str(PAID_SESSIONS_DIR / f"{msg.from_user.id}.session")
+    if not api_id or not api_hash:
+        return False
+    try:
+        client = TelegramClient(session_path, int(api_id), api_hash)
+        await client.connect()
+        if await client.is_user_authorized():
+            paid["status"] = "ready"
+            paid["session"] = session_path
+            await auth_set_paid_account(msg.from_user.id, paid)
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
+            await state.clear()
+            await msg.answer("✅ Аккаунт уже авторизован. Нажми /start.")
+            return True
+        await client.disconnect()
+    except Exception:
+        return False
+    return False
+
+
 @router.callback_query(F.data == "paid_reg:cancel")
 async def paid_reg_cancel(callback: CallbackQuery, state: FSMContext):
+    await _disconnect_client(state)
     await state.clear()
     await callback.message.answer("❌ Регистрация отменена. Нажми /start чтобы начать заново.")
 
@@ -169,32 +231,47 @@ async def paid_reg_method(callback: CallbackQuery, state: FSMContext):
         api_hash = data["api_hash"]
         tfa_password = data.get("tfa_password") or ""
         session_path = PAID_SESSIONS_DIR / f"{callback.from_user.id}.session"
-        client = TelegramClient(session_path, api_id, api_hash)
-        await client.connect()
-        try:
-            qr = await client.qr_login()
-        except Exception as e:
-            if "PASSWORD" in str(e).upper():
-                if not tfa_password:
-                    await callback.message.answer(
-                        "🔒 Для этого аккаунта нужен пароль 2FA.\n"
-                        "Нажми /start и введи пароль на шаге 2FA.",
-                        reply_markup=_cancel_kb(),
-                    )
+        lock = _paid_lock(callback.from_user.id)
+        async with lock:
+            await _disconnect_client(state)
+            client = TelegramClient(session_path, api_id, api_hash)
+            await client.connect()
+            pending = {
+                "name": f"paid_{callback.from_user.id}",
+                "api_id": api_id,
+                "api_hash": api_hash,
+                "phone": None,
+                "session": str(session_path),
+                "status": "pending",
+            }
+            await auth_set_paid_account(callback.from_user.id, pending)
+            try:
+                qr = await client.qr_login()
+            except Exception as e:
+                if "PASSWORD" in str(e).upper():
+                    if not tfa_password:
+                        await callback.message.answer(
+                            "🔒 Для этого аккаунта нужен пароль 2FA.\n"
+                            "Нажми /start и введи пароль на шаге 2FA.",
+                            reply_markup=_cancel_kb(),
+                        )
+                        await state.clear()
+                        await _disconnect_client(state)
+                        return
+                    try:
+                        await client.sign_in(password=tfa_password)
+                        qr = await client.qr_login()
+                    except Exception as e2:
+                        await callback.message.answer(f"❌ Ошибка 2FA/QR: {e2}")
+                        await state.clear()
+                        await _disconnect_client(state)
+                        return
+                else:
+                    await callback.message.answer(f"❌ Не удалось создать QR: {e}")
                     await state.clear()
+                    await _disconnect_client(state)
                     return
-                try:
-                    await client.sign_in(password=tfa_password)
-                    qr = await client.qr_login()
-                except Exception as e2:
-                    await callback.message.answer(f"❌ Ошибка 2FA/QR: {e2}")
-                    await state.clear()
-                    return
-            else:
-                await callback.message.answer(f"❌ Не удалось создать QR: {e}")
-                await state.clear()
-                return
-        await state.update_data(client=client, qr=qr)
+            await state.update_data(client=client, qr=qr)
         await state.set_state(PaidRegistrationStates.waiting_for_qr_confirm)
         img_url = _qr_image_url(qr.url)
         await callback.message.answer_photo(
@@ -313,13 +390,15 @@ async def paid_reg_qr_check(callback: CallbackQuery, state: FSMContext):
         await callback.answer("QR не найден, создай новый", show_alert=True)
         return
     client: TelegramClient | None = data.get("client")
-    if client is None:
-        api_id = data.get("api_id")
-        api_hash = data.get("api_hash")
-        session_path = PAID_SESSIONS_DIR / f"{callback.from_user.id}.session"
-        client = TelegramClient(session_path, api_id, api_hash)
-        await client.connect()
-        await state.update_data(client=client)
+    lock = _paid_lock(callback.from_user.id)
+    async with lock:
+        if client is None:
+            api_id = data.get("api_id")
+            api_hash = data.get("api_hash")
+            session_path = PAID_SESSIONS_DIR / f"{callback.from_user.id}.session"
+            client = TelegramClient(session_path, api_id, api_hash)
+            await client.connect()
+            await state.update_data(client=client)
     print(f"🔎 QR check start: user_id={callback.from_user.id}")
     await callback.answer("Проверяю вход...")
     try:
@@ -375,26 +454,29 @@ async def paid_reg_qr_new(callback: CallbackQuery, state: FSMContext):
         await callback.answer("Сессия не найдена", show_alert=True)
         return
     await callback.answer()
-    try:
-        if await client.is_user_authorized():
-            await _finish_paid_auth(callback.message, state)
+    lock = _paid_lock(callback.from_user.id)
+    async with lock:
+        try:
+            if await client.is_user_authorized():
+                await _finish_paid_auth(callback.message, state)
+                return
+        except Exception:
+            pass
+        try:
+            qr = await client.qr_login()
+        except Exception as e:
+            await callback.message.answer(f"❌ Не удалось создать QR: {e}")
+            await state.clear()
+            await _disconnect_client(state)
             return
-    except Exception:
-        pass
-    try:
-        qr = await client.qr_login()
-    except Exception as e:
-        await callback.message.answer(f"❌ Не удалось создать QR: {e}")
-        await state.clear()
-        return
-    try:
-        resp = getattr(qr, "_resp", None)
-        if resp is not None and resp.__class__.__name__ == "LoginTokenSuccess":
-            await _finish_paid_auth(callback.message, state)
-            return
-    except Exception:
-        pass
-    await state.update_data(qr=qr)
+        try:
+            resp = getattr(qr, "_resp", None)
+            if resp is not None and resp.__class__.__name__ == "LoginTokenSuccess":
+                await _finish_paid_auth(callback.message, state)
+                return
+        except Exception:
+            pass
+        await state.update_data(qr=qr)
     img_url = _qr_image_url(qr.url)
     await callback.message.answer_photo(
         img_url,
@@ -411,6 +493,7 @@ async def paid_reg_qr_new(callback: CallbackQuery, state: FSMContext):
 async def paid_reg_reset_session(callback: CallbackQuery, state: FSMContext):
     if not await _ensure_paid_user_cb(callback, state):
         return
+    await _disconnect_client(state)
     _reset_paid_session(callback.from_user.id)
     await state.clear()
     await callback.answer("Сессия сброшена")
@@ -434,6 +517,6 @@ async def _finish_paid_auth(msg: Message, state: FSMContext):
         "status": "ready",
     }
     await auth_set_paid_account(msg.from_user.id, paid_account)
-
+    await _disconnect_client(state)
     await msg.answer("✅ Регистрация завершена. Нажми /start для входа в меню.")
     await state.clear()

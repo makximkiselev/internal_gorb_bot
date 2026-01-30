@@ -347,6 +347,11 @@ def run_bot():
                 if role == "paid_user":
                     paid = u.get("paid_account") or {}
                     if paid.get("status") != "ready":
+                        try:
+                            if await paid_registration.try_auto_finalize_paid(msg, state):
+                                return
+                        except Exception:
+                            pass
                         await paid_registration.start_paid_registration(msg, state)
                         return
 
