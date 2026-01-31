@@ -902,8 +902,12 @@ async def cm_menu_manage(cb: CallbackQuery):
     await cb.message.edit_text("🧩 Управление меню", reply_markup=kb)
 
 
-def _btn_scope_label(scope: str) -> str:
-    return "все меню" if scope == "all" else "финальное меню"
+def _btn_scope_label(scope: Optional[str]) -> str:
+    if scope == "all":
+        return "все меню"
+    if scope == "final":
+        return "финальное меню"
+    return "не выбран"
 
 
 async def _render_buttons_list(cb: CallbackQuery, ch: dict) -> None:
@@ -946,7 +950,7 @@ async def cm_btn_actions(cb: CallbackQuery):
     if not btn:
         await cb.answer("Кнопка не найдена", show_alert=True)
         return
-    scope = str(btn.get("scope") or "all")
+    scope = btn.get("scope")
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✏️ Редактировать название", callback_data=f"cm:btn_edit_title:{ch_id}:{btn_id}")],
         [InlineKeyboardButton(text="🔗 Редактировать ссылку", callback_data=f"cm:btn_edit_url:{ch_id}:{btn_id}")],
@@ -972,9 +976,36 @@ async def cm_btn_scope_toggle(cb: CallbackQuery):
     if not btn:
         await cb.answer("Кнопка не найдена", show_alert=True)
         return
-    scope = str(btn.get("scope") or "all")
-    btn["scope"] = "final" if scope == "all" else "all"
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Все меню", callback_data=f"cm:btn_scope_confirm:{ch_id}:{btn_id}:all")],
+        [InlineKeyboardButton(text="✅ Финальное меню", callback_data=f"cm:btn_scope_confirm:{ch_id}:{btn_id}:final")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"cm:btn:{ch_id}:{btn_id}")],
+    ])
+    await cb.message.edit_text(
+        "⚠️ При смене типа кнопки все сообщения канала будут удалены и опубликованы заново.\n\n"
+        "Выбери новый тип:",
+        reply_markup=kb,
+    )
+
+
+@router.callback_query(F.data.startswith("cm:btn_scope_confirm:"))
+async def cm_btn_scope_confirm(cb: CallbackQuery):
+    _, _, tail = (cb.data or "").partition("cm:btn_scope_confirm:")
+    try:
+        ch_id, btn_id, scope = tail.split(":", 2)
+    except ValueError:
+        await cb.answer("Ошибка", show_alert=True)
+        return
+    _u, reg, ch = await _get_channel_for_cb(cb, ch_id)
+    if not ch:
+        return
+    btn = _find_custom_button(ch, btn_id)
+    if not btn:
+        await cb.answer("Кнопка не найдена", show_alert=True)
+        return
+    btn["scope"] = "final" if scope == "final" else "all"
     _save_registry(reg)
+    await cb.answer("Сохранено")
     await cm_btn_actions(cb)
 
 
@@ -1107,13 +1138,13 @@ async def cm_btn_url_input(msg: Message, state: FSMContext):
             btn["url"] = url
     elif mode == "create":
         new_id = str(int(time.time() * 1000))
-        items.append({"id": new_id, "title": title, "url": url, "scope": "all"})
+        items.append({"id": new_id, "title": title, "url": url, "scope": None})
         _save_custom_buttons(ch, items)
         _save_registry(reg)
         await state.clear()
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="✅ Все меню", callback_data=f"cm:btn_scope_set:{ch_id}:{new_id}:all")],
-            [InlineKeyboardButton(text="✅ Финальное меню", callback_data=f"cm:btn_scope_set:{ch_id}:{new_id}:final")],
+            [InlineKeyboardButton(text="Все меню", callback_data=f"cm:btn_scope_set:{ch_id}:{new_id}:all")],
+            [InlineKeyboardButton(text="Финальное меню", callback_data=f"cm:btn_scope_set:{ch_id}:{new_id}:final")],
         ])
         await msg.answer(
             "Выбери режим кнопки:\n\n"
