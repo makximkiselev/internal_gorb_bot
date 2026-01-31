@@ -19,7 +19,7 @@ except Exception:  # pragma: no cover - fallback for parsing env without aiogram
             pass
 
 from storage import load_data
-from handlers.normalizers.entry import extract_region
+import importlib.util
 
 
 # =========================
@@ -36,6 +36,45 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 MATCHED_FILE = DATA_DIR / "parsed_matched.json"
 PARSED_FILE = DATA_DIR / "parsed_data.json"
+
+_REGION_FLAG_MAP: Optional[Dict[str, str]] = None
+_FLAG_RE = re.compile(r"[\U0001F1E6-\U0001F1FF]{2}")
+
+
+def _load_region_flag_map() -> Dict[str, str]:
+    global _REGION_FLAG_MAP
+    if _REGION_FLAG_MAP is not None:
+        return _REGION_FLAG_MAP
+    try:
+        from handlers.normalizers import entry_dicts as D  # type: ignore
+        _REGION_FLAG_MAP = dict(getattr(D, "REGION_FLAG_MAP", {}) or {})
+        return _REGION_FLAG_MAP
+    except Exception:
+        pass
+    try:
+        path = MODULE_DIR.parent / "normalizers" / "entry_dicts.py"
+        spec = importlib.util.spec_from_file_location("entry_dicts", path)
+        if spec and spec.loader:
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            _REGION_FLAG_MAP = dict(getattr(mod, "REGION_FLAG_MAP", {}) or {})
+            return _REGION_FLAG_MAP
+    except Exception:
+        pass
+    _REGION_FLAG_MAP = {}
+    return _REGION_FLAG_MAP
+
+
+def _extract_region_from_raw(raw: str) -> str:
+    flags = _FLAG_RE.findall(raw or "")
+    if not flags:
+        return ""
+    m = _load_region_flag_map()
+    for fl in flags:
+        reg = m.get(fl)
+        if reg:
+            return reg
+    return ""
 
 
 # -------------------------
@@ -197,7 +236,7 @@ def _build_index(matched: List[dict]) -> Dict[Tuple[Tuple[str, ...], str], Dict[
                 if mp is None or mp != min_price:
                     continue
                 raw = (p.get("raw") or "").strip()
-                reg = (extract_region(raw) or "").strip().lower()
+                reg = _extract_region_from_raw(raw).strip().lower()
                 if reg and reg not in out:
                     out.append(reg)
         if not out:
