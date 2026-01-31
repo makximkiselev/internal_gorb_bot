@@ -486,6 +486,18 @@ def _markup_values_in_subtree(ch: dict, path: list[str]) -> list[float]:
     return vals
 
 
+def _pricing_ready(ch: dict) -> bool:
+    if not ch.get("pricing_custom"):
+        return True
+    mv = ch.get("markup_values") or {}
+    has_overrides = isinstance(mv, dict) and bool(mv)
+    try:
+        default_val = float(ch.get("markup_default") or 0.0)
+    except Exception:
+        default_val = 0.0
+    return has_overrides or default_val > 0.0
+
+
 def _build_markup_tree_keyboard(
     tree: dict,
     current_path: list[str],
@@ -556,27 +568,19 @@ async def _render_markup_tree(
     title = ch.get("title") or ch.get("username") or ch_id
     if current_path:
         exact = _markup_value_for_path(ch, current_path)
-        eff = exact
-        source_path = None
-        if eff is None:
-            parts = [p for p in current_path if p]
-            for i in range(len(parts) - 1, 0, -1):
-                v = _markup_value_for_path(ch, parts[:i])
-                if v is not None:
-                    eff = v
-                    source_path = parts[:i]
-                    break
         mtype = ch.get("markup_type") or "flat"
         exact_txt = _format_markup_value(exact, mtype) if exact is not None else None
-        eff_txt = _format_markup_value(eff, mtype) if eff is not None else "не задана"
         if exact_txt is not None:
             line = f"Установленная наценка: {exact_txt}"
         else:
-            if source_path:
-                src = " / ".join(source_path)
-                line = f"Установленная наценка: {eff_txt} (наследуется из: {src})"
+            try:
+                def_val = float(ch.get("markup_default") or 0.0)
+            except Exception:
+                def_val = 0.0
+            if def_val > 0:
+                line = f"Установленная наценка: {_format_markup_value(def_val, mtype)} (по умолчанию)"
             else:
-                line = f"Установленная наценка: {eff_txt}"
+                line = "Установленная наценка: не задана"
         header = (
             "💸 Наценки\n"
             + " / ".join(current_path)
@@ -1927,6 +1931,9 @@ async def cm_update_one(cb: CallbackQuery):
     _u, _reg, ch = await _get_channel_for_cb(cb, ch_id)
     if not ch:
         return
+    if not _pricing_ready(ch):
+        await cb.answer("⚠️ Наценки не установлены. Задайте наценку и повторите.", show_alert=True)
+        return
 
     mode = "opt" if ch.get("type") == "opt" else "retail"
     target = _make_channel_ref(ch_id, ch)
@@ -2124,8 +2131,12 @@ async def cm_update_all(cb: CallbackQuery):
     reg = _filter_registry_for_user(reg, cb.from_user.id, u.get("role") == "admin")
     total_created = total_edited = total_skipped = total_removed = 0
     total_channels = 0
+    skipped_no_markup = 0
 
     for ch_id, ch in list(reg.items()):
+        if not _pricing_ready(ch):
+            skipped_no_markup += 1
+            continue
         mode = "opt" if ch.get("type") == "opt" else "retail"
         try:
             target = _make_channel_ref(ch_id, ch)
@@ -2146,6 +2157,7 @@ async def cm_update_all(cb: CallbackQuery):
     msg = (
         "📊 Сводка по всем каналам:\n"
         f"Каналов обновлено: {total_channels}\n"
+        f"Пропущено без наценок: {skipped_no_markup}\n"
         f"Создано: {total_created}\n"
         f"Отредактировано: {total_edited}\n"
         f"Пропущено: {total_skipped}\n"
@@ -2233,6 +2245,8 @@ async def schedule_daily_publish(client):
 
         for ch_id, ch in list(reg.items()):
             try:
+                if not _pricing_ready(ch):
+                    continue
                 pt = (ch.get("publish_time") or "").strip()
                 if not pt or pt != cur_hm:
                     continue

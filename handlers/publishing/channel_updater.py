@@ -979,14 +979,12 @@ def _resolve_pricing_for_path(channel_pricing: Optional[Union[str, dict]], price
     val = float(channel_pricing.get("markup_default") or 0.0)
     if prices_path:
         parts = [str(p) for p in prices_path if p]
-        for i in range(len(parts), 0, -1):
-            key = "|".join(parts[:i])
-            if key in overrides:
-                try:
-                    val = float(overrides.get(key))
-                except Exception:
-                    pass
-                break
+        key = "|".join(parts)
+        if key in overrides:
+            try:
+                val = float(overrides.get(key))
+            except Exception:
+                pass
     rule = dict(channel_pricing)
     if mtype == "pct":
         rule["pct"] = float(val) / 100.0
@@ -2078,6 +2076,10 @@ async def sync_channel(
     markup_overrides = ch_settings.get("markup_values") if ch_settings else {}
     if not isinstance(markup_overrides, dict):
         markup_overrides = {}
+
+    if pricing_custom and markup_default <= 0.0 and not markup_overrides:
+        _log("Pricing rules: no markups set, skip publishing")
+        return {"created": 0, "edited": 0, "skipped": 0, "removed": 0, "model_to_mid": {}}
 
     # ====== cover cfg (для картинок моделей) ======
     cover_cfg = _load_cover_images_cfg()
