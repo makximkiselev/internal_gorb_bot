@@ -133,7 +133,7 @@ def _is_variant_value(v: Any) -> bool:
     if not v:
         return True
 
-    allowed = {"min_price", "best_channels"}
+    allowed = {"min_price", "best_channels", "region"}
     if any(k not in allowed for k in v.keys()):
         return False
 
