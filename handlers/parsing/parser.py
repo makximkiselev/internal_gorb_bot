@@ -7,6 +7,7 @@ import re
 import sys
 import os
 import traceback
+import shutil
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -279,18 +280,62 @@ def _reset_data_dir_files() -> None:
     """
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
+    base_dir = DEFAULT_BASE_DIR.resolve()
+    is_user_dir = DATA_DIR.resolve() != base_dir
+
+    mutable = {
+        "parsed_messages.json",
+        "parsed_goods.json",
+        "parsed_matched.json",
+        "parsed_cache.json",
+        "parsed_data.json",
+        "unmatched_etalon.json",
+        "unmatched_parsed.json",
+        "unmatched_parsed_from_matcher.json",
+        "match_stats.json",
+    }
+
+    def _clear_file(path: Path) -> None:
+        try:
+            if path.suffix.lower() == ".json":
+                path.write_text("[]", encoding="utf-8")
+            else:
+                path.write_text("", encoding="utf-8")
+        except Exception:
+            pass
+
+    def _copy_base(name: str) -> None:
+        src = base_dir / name
+        dst = DATA_DIR / name
+        if not src.exists():
+            return
+        try:
+            if dst.exists() and dst.stat().st_size >= 20:
+                return
+            shutil.copy2(src, dst)
+        except Exception:
+            pass
+
+    if is_user_dir:
+        for name in mutable:
+            _clear_file(DATA_DIR / name)
+        # гарантируем эталоны/индексы от базы, если их нет
+        for name in (
+            "parsed_etalon.json",
+            "model_index.json",
+            "code_index.json",
+            "model_aliases.json",
+            "etalon_learned_tokens.json",
+            "etalon_stats.json",
+            "alias_collisions.json",
+        ):
+            _copy_base(name)
+        return
+
     for p in DATA_DIR.iterdir():
         if not p.is_file():
             continue
-
-        try:
-            if p.suffix.lower() == ".json":
-                p.write_text("[]", encoding="utf-8")
-            else:
-                p.write_text("", encoding="utf-8")
-        except Exception:
-            # не валим парсер, если один файл не удалось очистить
-            pass
+        _clear_file(p)
 
 
 
