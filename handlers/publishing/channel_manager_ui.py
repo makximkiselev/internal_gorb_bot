@@ -557,21 +557,30 @@ async def _render_markup_tree(
     if current_path:
         exact = _markup_value_for_path(ch, current_path)
         eff = exact
+        source_path = None
         if eff is None:
             parts = [p for p in current_path if p]
             for i in range(len(parts) - 1, 0, -1):
                 v = _markup_value_for_path(ch, parts[:i])
                 if v is not None:
                     eff = v
+                    source_path = parts[:i]
                     break
         mtype = ch.get("markup_type") or "flat"
-        exact_txt = _format_markup_value(exact, mtype) if exact is not None else "не задана"
+        exact_txt = _format_markup_value(exact, mtype) if exact is not None else None
         eff_txt = _format_markup_value(eff, mtype) if eff is not None else "не задана"
+        if exact_txt is not None:
+            line = f"Установленная наценка: {exact_txt}"
+        else:
+            if source_path:
+                src = " / ".join(source_path)
+                line = f"Установленная наценка: {eff_txt} (наследуется из: {src})"
+            else:
+                line = f"Установленная наценка: {eff_txt}"
         header = (
             "💸 Наценки\n"
             + " / ".join(current_path)
-            + f"\n\nУстановленная наценка: {exact_txt}\n"
-            + f"Эффективная наценка: {eff_txt}"
+            + f"\n\n{line}"
         )
     else:
         header = f"💸 Наценки для канала:\n<b>{title}</b>"
