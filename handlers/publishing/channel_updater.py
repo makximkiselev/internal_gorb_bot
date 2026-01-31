@@ -1080,7 +1080,7 @@ def _render_model_body_from_prices_and_template(
         if extract_region and not extract_region(t):
             reg = ""
             if isinstance(payload, dict):
-                reg = (payload.get("region") or "").strip()
+                reg = (payload.get("region_min") or payload.get("region") or "").strip()
     if not reg and region_index is not None:
         key = (tuple(prices_path), _norm_key(t))
         info = region_index.get(key)

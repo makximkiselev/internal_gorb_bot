@@ -133,7 +133,7 @@ def _is_variant_value(v: Any) -> bool:
     if not v:
         return True
 
-    allowed = {"min_price", "best_channels", "region"}
+    allowed = {"min_price", "best_channels", "region", "region_min"}
     if any(k not in allowed for k in v.keys()):
         return False
 
@@ -218,7 +218,7 @@ def _build_index(matched: List[dict]) -> Dict[Tuple[Tuple[str, ...], str], Dict[
         info = {
             "min_price": mp,
             "best_channels": best_channels,
-            "region": region or None,
+            "region_min": region or None,
         }
         key = (tuple(path), raw_norm)
         existing = idx.get(key)
@@ -280,7 +280,7 @@ def _merge_catalog_with_prices(
                     variants_out[variant_title] = {
                         "min_price": info["min_price"],
                         "best_channels": info.get("best_channels") or [],
-                        "region": info.get("region"),
+                        "region_min": info.get("region_min"),
                     }
                 else:
                     variants_out[variant_title] = {}
@@ -311,7 +311,7 @@ def _merge_catalog_with_prices(
                     variants_out[variant_title] = {
                         "min_price": info["min_price"],
                         "best_channels": info.get("best_channels") or [],
-                        "region": info.get("region"),
+                        "region_min": info.get("region_min"),
                     }
                 else:
                     # сохраняем пустым (даже если vv уже был с ценой — rebuild всегда строит заново)

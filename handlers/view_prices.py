@@ -331,7 +331,7 @@ def _is_variant_value(v: Any) -> bool:
         return False
     if not v:
         return True
-    allowed = {"min_price", "best_channels", "region"}
+    allowed = {"min_price", "best_channels", "region", "region_min"}
     return all(k in allowed for k in v.keys())
 
 
@@ -453,7 +453,7 @@ def _render_variant_line(
             return title
         reg = ""
         if isinstance(payload, dict) and payload.get("min_price") is not None:
-            reg = (payload.get("region") or "").strip()
+            reg = (payload.get("region_min") or payload.get("region") or "").strip()
         if not reg and region_index is not None and model_path:
             key = (tuple(model_path), _norm_key(title))
             info2 = region_index.get(key)
