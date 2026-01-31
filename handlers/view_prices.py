@@ -749,6 +749,7 @@ async def cb_go(callback: CallbackQuery):
 
     u = await auth_get(callback.from_user.id)
     data = _ensure_parsed_data(_parsed_data_path_for_user(u))
+    region_index = _get_region_index_for_user(u)
     root = _get_catalog_root(data)
 
     node = _dig(root, path)
