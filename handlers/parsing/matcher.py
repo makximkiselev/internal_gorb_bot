@@ -47,7 +47,17 @@ except Exception:
 try:
     from handlers.parsing import results as results_builder
 except Exception:
-    results_builder = None
+    try:
+        import importlib.util
+        _results_path = Path(__file__).resolve().parent / "results.py"
+        spec = importlib.util.spec_from_file_location("parsing_results", _results_path)
+        if spec and spec.loader:
+            results_builder = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(results_builder)
+        else:
+            results_builder = None
+    except Exception:
+        results_builder = None
 
 
 # ======================
