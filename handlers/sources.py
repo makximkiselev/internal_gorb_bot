@@ -104,9 +104,6 @@ async def show_sources_menu(callback: CallbackQuery, state: FSMContext):
     if not u or not (u.get("role") == "admin" or (u.get("access") or {}).get("settings.sources")):
         await callback.answer("⛔️ Нет доступа", show_alert=True)
         return
-    if u.get("role") != "admin" and u.get("sources_mode") not in ("own", "custom"):
-        await callback.answer("⛔️ Источники недоступны в режиме 'По умолчанию'", show_alert=True)
-        return
     await state.clear()
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="➕ Добавить канал", callback_data="add_channel")],

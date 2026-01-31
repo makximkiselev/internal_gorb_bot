@@ -233,9 +233,7 @@ def run_bot():
                     rows.append([InlineKeyboardButton(text="📊 Внешние таблицы", callback_data="menu:external")])
                 if _access_allowed(u, "settings.cm"):
                     rows.append([InlineKeyboardButton(text="🗂 Управление каналами", callback_data="cm:open")])
-                settings_keys = ["settings.auth", "settings.auto_replies", "settings.accounts"]
-                if u.get("role") == "admin" or u.get("sources_mode") in ("own", "custom"):
-                    settings_keys.append("settings.sources")
+                settings_keys = ["settings.auth", "settings.auto_replies", "settings.accounts", "settings.sources"]
                 if _any_access(u, settings_keys):
                     rows.append([InlineKeyboardButton(text="⚙️ Настройки", callback_data="menu:settings")])
                 if not rows:
@@ -317,9 +315,7 @@ def run_bot():
             if _access_allowed(u, "settings.auth"):
                 rows.append([InlineKeyboardButton(text="🔐 Авторизация", callback_data="auth:menu")])
             if _access_allowed(u, "settings.sources"):
-                mode = u.get("sources_mode", "default")
-                if u.get("role") == "admin" or mode in ("own", "custom"):
-                    rows.append([InlineKeyboardButton(text="📡 Источники", callback_data="sources")])
+                rows.append([InlineKeyboardButton(text="📡 Источники", callback_data="sources")])
             if _access_allowed(u, "settings.auto_replies"):
                 rows.append([InlineKeyboardButton(text="🤖 Автоответы", callback_data="auto_replies")])
             if _access_allowed(u, "settings.accounts"):
@@ -435,9 +431,7 @@ def run_bot():
             if role in ("pending", "rejected"):
                 await callback.message.answer(PENDING_TEXT)
                 return
-            settings_keys = ["settings.auth", "settings.auto_replies", "settings.accounts"]
-            if u.get("role") == "admin" or u.get("sources_mode") in ("own", "custom"):
-                settings_keys.append("settings.sources")
+            settings_keys = ["settings.auth", "settings.auto_replies", "settings.accounts", "settings.sources"]
             if not _any_access(u, settings_keys):
                 await callback.answer("⛔️ Нет доступа", show_alert=True)
                 return
