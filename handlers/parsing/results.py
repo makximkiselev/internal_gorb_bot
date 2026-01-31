@@ -11,7 +11,12 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Tuple, Optional
 
 # ✅ чтобы main.py мог сделать dp.include_router(results.router)
-from aiogram import Router
+try:
+    from aiogram import Router
+except Exception:  # pragma: no cover - fallback for parsing env without aiogram
+    class Router:  # type: ignore
+        def __init__(self, *args, **kwargs):
+            pass
 
 from storage import load_data
 from handlers.normalizers.entry import extract_region
