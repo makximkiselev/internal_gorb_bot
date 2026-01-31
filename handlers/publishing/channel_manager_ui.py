@@ -976,9 +976,12 @@ async def cm_btn_scope_toggle(cb: CallbackQuery):
     if not btn:
         await cb.answer("Кнопка не найдена", show_alert=True)
         return
+    current = btn.get("scope")
+    label_all = "✅ Все меню" if current == "all" else "Все меню"
+    label_final = "✅ Финальное меню" if current == "final" else "Финальное меню"
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Все меню", callback_data=f"cm:btn_scope_confirm:{ch_id}:{btn_id}:all")],
-        [InlineKeyboardButton(text="✅ Финальное меню", callback_data=f"cm:btn_scope_confirm:{ch_id}:{btn_id}:final")],
+        [InlineKeyboardButton(text=label_all, callback_data=f"cm:btn_scope_confirm:{ch_id}:{btn_id}:all")],
+        [InlineKeyboardButton(text=label_final, callback_data=f"cm:btn_scope_confirm:{ch_id}:{btn_id}:final")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"cm:btn:{ch_id}:{btn_id}")],
     ])
     await cb.message.edit_text(
