@@ -203,12 +203,13 @@ async def _search_dialogs(query: str, src_type: str, *, user_id: int | None = No
 
 
 # === Построение клавиатуры множественного выбора ===
-def _build_selection_keyboard(found, src_type: str, selected: set[int]):
+def _build_selection_keyboard(found, src_type: str, selected: set[str]):
     rows = []
     for acc, d in found:
         eid = int(d.entity.id)
+        sel_key = f"{acc}:{eid}"
         icon = {"channel": "📺", "chat": "💬", "bot": "🤖"}[src_type]
-        mark = "✅" if eid in selected else "☑️"
+        mark = "✅" if sel_key in selected else "☑️"
         uname = getattr(d.entity, "username", "") or ""
         title = d.name or ("@" + uname if uname else "без имени")
         suffix = f" (@{uname})" if uname else ""
@@ -276,11 +277,12 @@ async def toggle_select(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     found = data.get("found", [])
     selected = set(data.get("selected", []))
+    sel_key = f"{acc}:{eid}"
 
-    if eid in selected:
-        selected.remove(eid)
+    if sel_key in selected:
+        selected.remove(sel_key)
     else:
-        selected.add(eid)
+        selected.add(sel_key)
     data["selected"] = list(selected)
     await state.update_data(**data)
 
@@ -317,7 +319,8 @@ async def save_selected(callback: CallbackQuery, state: FSMContext):
     db = load_sources()
     count = 0
     for acc, eid, name, uname in found:
-        if eid in selected:
+        sel_key = f"{acc}:{eid}"
+        if sel_key in selected:
             entry = {"name": name, "channel_id": int(eid), "account": acc}
             if not is_admin:
                 entry["user_id"] = callback.from_user.id
