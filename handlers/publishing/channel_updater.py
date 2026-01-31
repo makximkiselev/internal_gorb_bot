@@ -28,6 +28,7 @@ from handlers.publishing.storage import (
     load_status_extra,
     load_managed_channels,
 )
+from handlers.parsing.context import user_data_dir, DEFAULT_BASE_DIR
 
 
 # ====================== Настройки темпа публикаций (мягкий rate-limit) ======================
@@ -78,6 +79,25 @@ def _load_channel_settings(peer_id_short: str, peer_id: str) -> dict:
     if not isinstance(reg, dict):
         return {}
     return reg.get(peer_id_short) or reg.get(peer_id) or {}
+
+
+def _load_user_settings(user_id: int | None) -> dict:
+    if not user_id:
+        return {}
+    try:
+        path = DEFAULT_BASE_DIR.parent / "data" / "auth_users.json"
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        u = (raw.get("users") or {}).get(str(int(user_id))) or {}
+        return u if isinstance(u, dict) else {}
+    except Exception:
+        return {}
+
+
+def _parsed_is_empty(parsed: dict) -> bool:
+    if not isinstance(parsed, dict):
+        return True
+    cat = _extract_prices_catalog_from_parsed(parsed)
+    return not (isinstance(cat, dict) and len(cat) > 0)
 
 
 async def _throttle(base: float = THROTTLE_SECS) -> None:
@@ -157,12 +177,12 @@ def _read_json(paths: Tuple[Path, ...]) -> tuple[dict, Optional[str]]:
     return {}, None
 
 
-def _load_parsed_data() -> tuple[dict, Optional[str]]:
+def _load_parsed_data(preferred_paths: Optional[list[Path]] = None) -> tuple[dict, Optional[str]]:
     """
     parsed_data.json — источник цен (catalog) и channel_pricing.
     """
     here = Path(__file__).resolve()
-    candidates = tuple(dict.fromkeys([
+    base_candidates = [
         Path("parsed_data.json"),
         Path("./parsed_data.json"),
         Path("./data/parsed_data.json"),
@@ -173,7 +193,11 @@ def _load_parsed_data() -> tuple[dict, Optional[str]]:
         here.parents[2] / "handlers" / "parsing" / "data" / "parsed_data.json",
         here.parents[1] / "parsing" / "parsed_data.json",
         here.parents[1] / "parsing" / "data" / "parsed_data.json",
-    ]))
+    ]
+    if preferred_paths:
+        candidates = tuple(dict.fromkeys([*preferred_paths, *base_candidates]))
+    else:
+        candidates = tuple(dict.fromkeys(base_candidates))
     data, src = _read_json(candidates)
     if src:
         _log(f"parsed_data.json source: {src}")
@@ -2038,24 +2062,6 @@ async def sync_channel(
     channel_mode: str = "opt",
     aio_bot: Optional[AiogramBot] = None
 ) -> dict:
-    # ====== parsed_data.json: источник цен + channel_pricing ======
-    parsed, _parsed_src = _load_parsed_data()
-    _debug_parsed_shape(parsed)
-
-    prices_tree = _extract_prices_catalog_from_parsed(parsed)
-    if not prices_tree:
-        _log("Nothing to publish: empty catalog(prices) in parsed_data.json")
-        return {"created": 0, "edited": 0, "skipped": 0, "removed": 0, "model_to_mid": {}}
-
-    _log(f"prices(models by count): {_count_models_in_catalog(prices_tree)}")
-
-    # ====== data.json: TEMPLATE (разделители/варианты) ======
-    db = load_data()
-    template_tree = db.get("etalon") or {}
-    if not isinstance(template_tree, dict) or not template_tree:
-        _log("Nothing to publish: empty catalog(template) in data.json")
-        return {"created": 0, "edited": 0, "skipped": 0, "removed": 0, "model_to_mid": {}}
-
     # ====== entity / peer_id ======
     entity = await client.get_entity(channel_ref)
     peer_id = str(utils.get_peer_id(entity))          # "-100123..."
@@ -2064,6 +2070,9 @@ async def sync_channel(
 
     # ====== channel settings (managed_channels) ======
     ch_settings = _load_channel_settings(peer_id_short, peer_id)
+    user_id = ch_settings.get("user_id") if isinstance(ch_settings, dict) else None
+    u_settings = _load_user_settings(int(user_id)) if user_id else {}
+    sources_mode = (u_settings.get("sources_mode") or "default").strip().lower()
     img_flag = ch_settings.get("images_enabled") if ch_settings else None
     images_enabled = (channel_mode == "retail") if img_flag is None else bool(img_flag)
     text_mode = (ch_settings.get("text_mode") if ch_settings else None) or "normal"
@@ -2079,6 +2088,31 @@ async def sync_channel(
 
     if pricing_custom and markup_default <= 0.0 and not markup_overrides:
         _log("Pricing rules: no markups set, skip publishing")
+        return {"created": 0, "edited": 0, "skipped": 0, "removed": 0, "model_to_mid": {}}
+
+    # ====== parsed_data.json: источник цен + channel_pricing ======
+    preferred = []
+    if user_id and sources_mode in ("own", "custom"):
+        preferred.append(user_data_dir(int(user_id)) / "parsed_data.json")
+    parsed, _parsed_src = _load_parsed_data(preferred_paths=preferred)
+    if sources_mode == "custom" and _parsed_is_empty(parsed):
+        parsed, _parsed_src = _load_parsed_data(preferred_paths=[DEFAULT_BASE_DIR / "parsed_data.json"])
+    if sources_mode == "default":
+        parsed, _parsed_src = _load_parsed_data(preferred_paths=[DEFAULT_BASE_DIR / "parsed_data.json"])
+    _debug_parsed_shape(parsed)
+
+    prices_tree = _extract_prices_catalog_from_parsed(parsed)
+    if not prices_tree:
+        _log("Nothing to publish: empty catalog(prices) in parsed_data.json")
+        return {"created": 0, "edited": 0, "skipped": 0, "removed": 0, "model_to_mid": {}}
+
+    _log(f"prices(models by count): {_count_models_in_catalog(prices_tree)}")
+
+    # ====== data.json: TEMPLATE (разделители/варианты) ======
+    db = load_data()
+    template_tree = db.get("etalon") or {}
+    if not isinstance(template_tree, dict) or not template_tree:
+        _log("Nothing to publish: empty catalog(template) in data.json")
         return {"created": 0, "edited": 0, "skipped": 0, "removed": 0, "model_to_mid": {}}
 
     # ====== cover cfg (для картинок моделей) ======
