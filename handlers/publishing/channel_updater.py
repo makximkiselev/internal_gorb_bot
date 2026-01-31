@@ -975,10 +975,22 @@ def _render_model_body_from_prices_and_template(
                 last_empty = False
             continue
 
+        try:
+            from handlers.normalizers.entry import extract_region
+        except Exception:
+            extract_region = None
+
         any_prices = True
         effective_pricing = _resolve_pricing_for_path(channel_pricing, prices_path)
         adj = _apply_channel_markup(price, effective_pricing)
-        out.append(f"{t} - {_fmt_price_int(adj)}")
+        title = t
+        if extract_region and not extract_region(t):
+            reg = ""
+            if isinstance(payload, dict):
+                reg = (payload.get("region") or "").strip()
+            if reg:
+                title = f"{reg.upper()} {t}"
+        out.append(f"{title} - {_fmt_price_int(adj)}")
         last_empty = False
 
     while out and out[-1] == "":

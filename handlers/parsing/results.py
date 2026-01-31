@@ -197,6 +197,10 @@ def _build_index(matched: List[dict]) -> Dict[Tuple[Tuple[str, ...], str], Dict[
             bch = [bch]
         if not isinstance(bch, list):
             bch = []
+        params = it.get("params") or {}
+        if not isinstance(params, dict):
+            params = {}
+        region = (params.get("region") or "").strip().lower()
 
         # нормализация каналов
         best_channels: List[str] = []
@@ -214,8 +218,16 @@ def _build_index(matched: List[dict]) -> Dict[Tuple[Tuple[str, ...], str], Dict[
         info = {
             "min_price": mp,
             "best_channels": best_channels,
+            "region": region or None,
         }
-        idx[(tuple(path), raw_norm)] = info
+        key = (tuple(path), raw_norm)
+        existing = idx.get(key)
+        if existing is None:
+            idx[key] = info
+        else:
+            ex_mp = existing.get("min_price")
+            if ex_mp is None or (mp is not None and mp < ex_mp):
+                idx[key] = info
 
         raw_stripped = _strip_ram(raw_norm)
         if raw_stripped != raw_norm:
@@ -268,6 +280,7 @@ def _merge_catalog_with_prices(
                     variants_out[variant_title] = {
                         "min_price": info["min_price"],
                         "best_channels": info.get("best_channels") or [],
+                        "region": info.get("region"),
                     }
                 else:
                     variants_out[variant_title] = {}
@@ -298,6 +311,7 @@ def _merge_catalog_with_prices(
                     variants_out[variant_title] = {
                         "min_price": info["min_price"],
                         "best_channels": info.get("best_channels") or [],
+                        "region": info.get("region"),
                     }
                 else:
                     # сохраняем пустым (даже если vv уже был с ценой — rebuild всегда строит заново)

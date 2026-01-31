@@ -341,9 +341,26 @@ def _render_variant_line(variant_title: str, info: Any) -> str:
     """
     vt = str(variant_title)
 
+    def _prefixed_title(title: str, payload: Any) -> str:
+        try:
+            from handlers.normalizers.entry import extract_region
+        except Exception:
+            return title
+        if extract_region(title):
+            return title
+        if not isinstance(payload, dict):
+            return title
+        if payload.get("min_price") is None:
+            return title
+        reg = (payload.get("region") or "").strip()
+        if not reg:
+            return title
+        return f"{reg.upper()} {title}"
+
     if not isinstance(info, dict) or not info or info.get("min_price") is None:
         return f"{vt} — —"
 
+    vt = _prefixed_title(vt, info)
     mp = _fmt_price(info.get("min_price"))
     ch = info.get("best_channels") or []
     ch_list: List[str] = []
