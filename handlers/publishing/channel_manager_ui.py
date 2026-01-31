@@ -25,6 +25,7 @@ from handlers.publishing.storage import (
     purge_channel_storage,
 )
 from handlers.publishing.channel_updater import sync_channel, hide_opt_models
+from telethon_manager import get_paid_client
 from handlers.auth_utils import auth_get
 
 router = Router()
@@ -45,6 +46,18 @@ def _get_client():
     if _telethon_client is None:
         raise RuntimeError("❌ Telethon client не подключён. Вызови attach_telethon_client() в main.py")
     return _telethon_client
+
+
+async def _get_channel_client(ch: dict):
+    try:
+        user_id = ch.get("user_id")
+    except Exception:
+        user_id = None
+    if user_id:
+        pc = await get_paid_client(int(user_id))
+        if pc:
+            return pc
+    return _get_client()
 
 
 # =========================
@@ -654,7 +667,7 @@ class MarkupValueStates(StatesGroup):
 _USERNAME_RE = re.compile(r"(?i)^(?:@|https?://t\.me/)(?P<u>[a-z0-9_]{5,})$")
 
 
-async def _resolve_channel_via_telethon(raw: str):
+async def _resolve_channel_via_telethon(raw: str, *, user_id: int | None = None):
     raw = (raw or "").strip()
     m = _USERNAME_RE.match(raw)
     if m:
@@ -665,7 +678,11 @@ async def _resolve_channel_via_telethon(raw: str):
         else:
             raise ValueError("Укажите @username или ссылку t.me/username")
 
-    client = _get_client()
+    client = None
+    if user_id:
+        client = await get_paid_client(int(user_id))
+    if not client:
+        client = _get_client()
     entity = await client.get_entity(username)
     if getattr(entity, "bot", False):
         raise ValueError("Это бот, нужен канал/группа.")
@@ -720,7 +737,7 @@ async def cm_add_cancel(cb: CallbackQuery, state: FSMContext):
 async def cm_add_handle_input(msg: Message, state: FSMContext):
     text = (msg.text or "").strip()
     try:
-        peer_id, info = await _resolve_channel_via_telethon(text)
+        peer_id, info = await _resolve_channel_via_telethon(text, user_id=msg.from_user.id)
         reg = _get_registry()
         existed = reg.get(peer_id, {})
         u = await auth_get(msg.from_user.id)
@@ -1937,10 +1954,11 @@ async def cm_update_one(cb: CallbackQuery):
 
     mode = "opt" if ch.get("type") == "opt" else "retail"
     target = _make_channel_ref(ch_id, ch)
+    client = await _get_channel_client(ch)
 
     try:
         result = await sync_channel(
-            _get_client(),
+            client,
             target,
             channel_mode=mode,
             aio_bot=cb.bot,
@@ -1980,7 +1998,8 @@ async def cm_hide_one(cb: CallbackQuery):
 
     target = _make_channel_ref(ch_id, ch)
     try:
-        updated = await hide_opt_models(_get_client(), target, channel_mode="opt")
+        client = await _get_channel_client(ch)
+        updated = await hide_opt_models(client, target, channel_mode="opt")
     except Exception as e:
         await cb.answer(f"Ошибка скрытия: {e}", show_alert=True)
         return
@@ -2141,7 +2160,7 @@ async def cm_update_all(cb: CallbackQuery):
         try:
             target = _make_channel_ref(ch_id, ch)
             result = await sync_channel(
-                _get_client(),
+                await _get_channel_client(ch),
                 target,
                 channel_mode=mode,
                 aio_bot=cb.bot,
@@ -2193,7 +2212,8 @@ async def schedule_daily_announcements(client):
                 continue
             try:
                 target = _make_channel_ref(ch_id, ch)
-                await client.send_message(target, "Цены и наличие обновлены")
+                ch_client = await _get_channel_client(ch)
+                await ch_client.send_message(target, "Цены и наличие обновлены")
                 ch["last_announce_date"] = today
                 _save_registry(reg)
             except Exception:
@@ -2224,7 +2244,7 @@ async def schedule_daily_opt_hide(client):
                 continue
             try:
                 target = _make_channel_ref(ch_id, ch)
-                await hide_opt_models(_get_client(), target, channel_mode="opt")
+                await hide_opt_models(await _get_channel_client(ch), target, channel_mode="opt")
                 ch["last_hide_at"] = f"{today} {cur_hm}"
                 _save_registry(reg)
             except Exception:
@@ -2255,7 +2275,7 @@ async def schedule_daily_publish(client):
                 target = _make_channel_ref(str(ch_id), ch)
                 mode = "opt" if ch.get("type") == "opt" else "retail"
                 await sync_channel(
-                    client,
+                    await _get_channel_client(ch),
                     target,
                     channel_mode=mode,
                 )
