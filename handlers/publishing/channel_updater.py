@@ -1081,16 +1081,32 @@ def _render_model_body_from_prices_and_template(
             reg = ""
             if isinstance(payload, dict):
                 reg = (payload.get("region") or "").strip()
-            if not reg and region_index is not None:
-                key = (tuple(prices_path), _norm_key(t))
-                info = region_index.get(key)
-                if info is None:
-                    key = (tuple(prices_path), _strip_ram(_norm_key(t)))
-                    info = region_index.get(key)
-                if info:
-                    reg = (info.get("region") or "").strip()
-            if reg:
-                title = f"{reg.upper()} {t}"
+    if not reg and region_index is not None:
+        key = (tuple(prices_path), _norm_key(t))
+        info = region_index.get(key)
+        if info is None:
+            key = (tuple(prices_path), _strip_ram(_norm_key(t)))
+            info = region_index.get(key)
+        if info:
+            reg = (info.get("region") or "").strip()
+    if not reg and region_index is not None:
+        best_price = None
+        best_region = ""
+        for (mpath, _raw_key), info2 in region_index.items():
+            if tuple(mpath) != tuple(prices_path):
+                continue
+            if not isinstance(info2, dict):
+                continue
+            reg2 = (info2.get("region") or "").strip()
+            price2 = info2.get("price")
+            if reg2:
+                if best_price is None or (price2 is not None and price2 < best_price):
+                    best_price = price2
+                    best_region = reg2
+        if best_region:
+            reg = best_region
+    if reg:
+        title = f"{reg.upper()} {t}"
         out.append(f"{title} - {_fmt_price_int(adj)}")
         last_empty = False
 

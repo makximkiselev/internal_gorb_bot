@@ -462,6 +462,22 @@ def _render_variant_line(
                 info2 = region_index.get(key)
             if info2:
                 reg = (info2.get("region") or "").strip()
+        if not reg and region_index is not None and model_path:
+            best_price = None
+            best_region = ""
+            for (mpath, _raw_key), info2 in region_index.items():
+                if tuple(mpath) != tuple(model_path):
+                    continue
+                if not isinstance(info2, dict):
+                    continue
+                reg2 = (info2.get("region") or "").strip()
+                price2 = info2.get("price")
+                if reg2:
+                    if best_price is None or (price2 is not None and price2 < best_price):
+                        best_price = price2
+                        best_region = reg2
+            if best_region:
+                reg = best_region
         if not reg:
             return title
         return f"{reg.upper()} {title}"
