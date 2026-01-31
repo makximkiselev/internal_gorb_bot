@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Tuple, Optional
 from aiogram import Router
 
 from storage import load_data
+from handlers.normalizers.entry import extract_region
 
 
 # =========================
@@ -178,6 +179,30 @@ def _build_index(matched: List[dict]) -> Dict[Tuple[Tuple[str, ...], str], Dict[
     idx: Dict[Tuple[Tuple[str, ...], str], Dict[str, Any]] = {}
     stripped_bucket: Dict[Tuple[Tuple[str, ...], str], List[Dict[str, Any]]] = {}
 
+    def _regions_for_min_price(item: dict, min_price: Optional[float]) -> List[str]:
+        out: List[str] = []
+        if min_price is None:
+            return out
+        prices = item.get("prices")
+        if isinstance(prices, list):
+            for p in prices:
+                if not isinstance(p, dict):
+                    continue
+                mp = _price_to_float(p.get("price"))
+                if mp is None or mp != min_price:
+                    continue
+                raw = (p.get("raw") or "").strip()
+                reg = (extract_region(raw) or "").strip().lower()
+                if reg and reg not in out:
+                    out.append(reg)
+        if not out:
+            params = item.get("params") or {}
+            if isinstance(params, dict):
+                reg = (params.get("region") or "").strip().lower()
+                if reg:
+                    out.append(reg)
+        return out
+
     for it in matched:
         path = it.get("path") or []
         raw = (it.get("raw_parsed") or "").strip()
@@ -215,10 +240,11 @@ def _build_index(matched: List[dict]) -> Dict[Tuple[Tuple[str, ...], str], Dict[
         if not raw_norm:
             continue
 
+        regions = _regions_for_min_price(it, mp)
         info = {
             "min_price": mp,
             "best_channels": best_channels,
-            "region_min": region or None,
+            "region_min": regions,
         }
         key = (tuple(path), raw_norm)
         existing = idx.get(key)
@@ -228,6 +254,14 @@ def _build_index(matched: List[dict]) -> Dict[Tuple[Tuple[str, ...], str], Dict[
             ex_mp = existing.get("min_price")
             if ex_mp is None or (mp is not None and mp < ex_mp):
                 idx[key] = info
+            elif mp is not None and ex_mp is not None and mp == ex_mp:
+                ex_regions = existing.get("region_min") or []
+                if not isinstance(ex_regions, list):
+                    ex_regions = [str(ex_regions)]
+                for r in regions:
+                    if r not in ex_regions:
+                        ex_regions.append(r)
+                existing["region_min"] = ex_regions
 
         raw_stripped = _strip_ram(raw_norm)
         if raw_stripped != raw_norm:

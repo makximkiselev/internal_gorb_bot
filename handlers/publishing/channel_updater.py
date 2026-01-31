@@ -29,6 +29,7 @@ from handlers.publishing.storage import (
     load_managed_channels,
 )
 from handlers.parsing.context import user_data_dir, DEFAULT_BASE_DIR
+from handlers.normalizers.entry_dicts import REGION_FLAG_MAP
 
 
 # ====================== Настройки темпа публикаций (мягкий rate-limit) ======================
@@ -68,6 +69,7 @@ COVER_IMAGES_FILE = Path(__file__).resolve().parent / "channel_cover_images.json
 # ====================== RETAIL: всегда MEDIA (placeholder если нет обложки) ======================
 RETAIL_ALWAYS_MEDIA = True
 DEFAULT_PLACEHOLDER_REL = "covers/_placeholder.jpg"  # лежит рядом: handlers/publishing/covers/_placeholder.jpg
+_REGION_FLAG_REVERSE = {v: k for k, v in REGION_FLAG_MAP.items()}
 
 
 def _log(msg: str) -> None:
@@ -204,9 +206,52 @@ def _strip_ram(s: str) -> str:
     return re.sub(r"\\b\\d{1,2}\\s*/\\s*(\\d{2,4}\\s*(?:gb|tb))\\b", r"\\1", s)
 
 
+def _regions_to_flags(regions: List[str]) -> str:
+    out: List[str] = []
+    for r in regions:
+        rr = (r or "").strip().lower()
+        if not rr:
+            continue
+        flag = _REGION_FLAG_REVERSE.get(rr)
+        out.append(flag or rr.upper())
+    return " ".join(out).strip()
+
+
 def _build_region_index_from_items(items: list[dict]) -> Dict[Tuple[Tuple[str, ...], str], Dict[str, Any]]:
     idx: Dict[Tuple[Tuple[str, ...], str], Dict[str, Any]] = {}
     stripped_bucket: Dict[Tuple[Tuple[str, ...], str], List[Dict[str, Any]]] = {}
+
+    def _regions_for_min_price(item: dict, min_price: Optional[float]) -> List[str]:
+        out: List[str] = []
+        if min_price is None:
+            return out
+        prices = item.get("prices")
+        if isinstance(prices, list):
+            for p in prices:
+                if not isinstance(p, dict):
+                    continue
+                try:
+                    mp = float(str(p.get("price") or "").replace(" ", ""))
+                except Exception:
+                    mp = None
+                if mp is None or mp != min_price:
+                    continue
+                raw = (p.get("raw") or "").strip()
+                try:
+                    from handlers.normalizers.entry import extract_region
+                except Exception:
+                    extract_region = None
+                if extract_region:
+                    reg = (extract_region(raw) or "").strip().lower()
+                    if reg and reg not in out:
+                        out.append(reg)
+        if not out:
+            params = item.get("params") or {}
+            if isinstance(params, dict):
+                reg = (params.get("region") or "").strip().lower()
+                if reg:
+                    out.append(reg)
+        return out
 
     for it in items:
         if not isinstance(it, dict):
@@ -221,15 +266,12 @@ def _build_region_index_from_items(items: list[dict]) -> Dict[Tuple[Tuple[str, .
             mp = float(str(it.get("min_price") or "").replace(" ", ""))
         except Exception:
             mp = None
-        params = it.get("params") or {}
-        if not isinstance(params, dict):
-            params = {}
-        region = (params.get("region") or "").strip().lower() or None
+        regions = _regions_for_min_price(it, mp)
 
         raw_norm = _norm_key(raw)
         if not raw_norm:
             continue
-        info = {"price": mp, "region": region}
+        info = {"price": mp, "region": regions}
 
         key = (tuple(path), raw_norm)
         ex = idx.get(key)
@@ -239,8 +281,14 @@ def _build_region_index_from_items(items: list[dict]) -> Dict[Tuple[Tuple[str, .
             ex_mp = ex.get("price")
             if ex_mp is None or (mp is not None and mp < ex_mp):
                 idx[key] = info
-            elif mp is not None and ex_mp is not None and mp == ex_mp and ex.get("region") is None and region:
-                idx[key] = info
+            elif mp is not None and ex_mp is not None and mp == ex_mp:
+                ex_regs = ex.get("region") or []
+                if not isinstance(ex_regs, list):
+                    ex_regs = [str(ex_regs)]
+                for r in regions:
+                    if r not in ex_regs:
+                        ex_regs.append(r)
+                ex["region"] = ex_regs
 
         raw_stripped = _strip_ram(raw_norm)
         if raw_stripped != raw_norm:
@@ -1080,33 +1128,41 @@ def _render_model_body_from_prices_and_template(
         if extract_region and not extract_region(t):
             reg = ""
             if isinstance(payload, dict):
-                reg = (payload.get("region_min") or payload.get("region") or "").strip()
-    if not reg and region_index is not None:
-        key = (tuple(prices_path), _norm_key(t))
-        info = region_index.get(key)
-        if info is None:
-            key = (tuple(prices_path), _strip_ram(_norm_key(t)))
-            info = region_index.get(key)
-        if info:
-            reg = (info.get("region") or "").strip()
-    if not reg and region_index is not None:
-        best_price = None
-        best_region = ""
-        for (mpath, _raw_key), info2 in region_index.items():
-            if tuple(mpath) != tuple(prices_path):
-                continue
-            if not isinstance(info2, dict):
-                continue
-            reg2 = (info2.get("region") or "").strip()
-            price2 = info2.get("price")
-            if reg2:
-                if best_price is None or (price2 is not None and price2 < best_price):
-                    best_price = price2
-                    best_region = reg2
-        if best_region:
-            reg = best_region
-    if reg:
-        title = f"{reg.upper()} {t}"
+                reg_val = payload.get("region_min") or payload.get("region") or ""
+                if isinstance(reg_val, list):
+                    reg = _regions_to_flags(reg_val)
+                else:
+                    reg = _regions_to_flags([str(reg_val)])
+            if not reg and region_index is not None:
+                key = (tuple(prices_path), _norm_key(t))
+                info = region_index.get(key)
+                if info is None:
+                    key = (tuple(prices_path), _strip_ram(_norm_key(t)))
+                    info = region_index.get(key)
+                if info:
+                    reg_val = info.get("region") or ""
+                    if isinstance(reg_val, list):
+                        reg = _regions_to_flags(reg_val)
+                    else:
+                        reg = _regions_to_flags([str(reg_val)])
+            if not reg and region_index is not None:
+                best_price = None
+                best_regions: List[str] = []
+                for (mpath, _raw_key), info2 in region_index.items():
+                    if tuple(mpath) != tuple(prices_path):
+                        continue
+                    if not isinstance(info2, dict):
+                        continue
+                    reg2 = info2.get("region") or []
+                    price2 = info2.get("price")
+                    if reg2:
+                        if best_price is None or (price2 is not None and price2 < best_price):
+                            best_price = price2
+                            best_regions = reg2 if isinstance(reg2, list) else [str(reg2)]
+                if best_regions:
+                    reg = _regions_to_flags(best_regions)
+            if reg:
+                title = f"{reg} {t}"
         out.append(f"{title} - {_fmt_price_int(adj)}")
         last_empty = False
 

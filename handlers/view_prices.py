@@ -19,6 +19,7 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     Message,
 )
+from handlers.normalizers.entry_dicts import REGION_FLAG_MAP
 
 router = Router(name="view_prices")
 
@@ -46,6 +47,7 @@ _PATH_MAX = 8000
 _PATH_SEQ = 0
 
 _REGION_INDEX_CACHE: Dict[str, Tuple[float, Dict[Tuple[Tuple[str, ...], str], Dict[str, Any]]]] = {}
+_REGION_FLAG_REVERSE = {v: k for k, v in REGION_FLAG_MAP.items()}
 
 
 def _cache_put(path: List[str]) -> str:
@@ -140,6 +142,17 @@ def _read_matched_items(path: Path) -> list[dict]:
     return []
 
 
+def _regions_to_flags(regions: List[str]) -> str:
+    out: List[str] = []
+    for r in regions:
+        rr = (r or "").strip().lower()
+        if not rr:
+            continue
+        flag = _REGION_FLAG_REVERSE.get(rr)
+        out.append(flag or rr.upper())
+    return " ".join(out).strip()
+
+
 def _matched_path_for_user(u: dict | None) -> Path:
     if not u or u.get("role") == "admin":
         return DEFAULT_BASE_DIR / "parsed_matched.json"
@@ -151,6 +164,38 @@ def _matched_path_for_user(u: dict | None) -> Path:
 def _build_region_index_from_items(items: list[dict]) -> Dict[Tuple[Tuple[str, ...], str], Dict[str, Any]]:
     idx: Dict[Tuple[Tuple[str, ...], str], Dict[str, Any]] = {}
     stripped_bucket: Dict[Tuple[Tuple[str, ...], str], List[Dict[str, Any]]] = {}
+
+    def _regions_for_min_price(item: dict, min_price: Optional[float]) -> List[str]:
+        out: List[str] = []
+        if min_price is None:
+            return out
+        prices = item.get("prices")
+        if isinstance(prices, list):
+            for p in prices:
+                if not isinstance(p, dict):
+                    continue
+                try:
+                    mp = float(str(p.get("price") or "").replace(" ", ""))
+                except Exception:
+                    mp = None
+                if mp is None or mp != min_price:
+                    continue
+                raw = (p.get("raw") or "").strip()
+                try:
+                    from handlers.normalizers.entry import extract_region
+                except Exception:
+                    extract_region = None
+                if extract_region:
+                    reg = (extract_region(raw) or "").strip().lower()
+                    if reg and reg not in out:
+                        out.append(reg)
+        if not out:
+            params = item.get("params") or {}
+            if isinstance(params, dict):
+                reg = (params.get("region") or "").strip().lower()
+                if reg:
+                    out.append(reg)
+        return out
 
     for it in items:
         if not isinstance(it, dict):
@@ -165,15 +210,12 @@ def _build_region_index_from_items(items: list[dict]) -> Dict[Tuple[Tuple[str, .
             mp = float(str(it.get("min_price") or "").replace(" ", ""))
         except Exception:
             mp = None
-        params = it.get("params") or {}
-        if not isinstance(params, dict):
-            params = {}
-        region = (params.get("region") or "").strip().lower() or None
+        regions = _regions_for_min_price(it, mp)
 
         raw_norm = _norm_key(raw)
         if not raw_norm:
             continue
-        info = {"price": mp, "region": region}
+        info = {"price": mp, "region": regions}
 
         key = (tuple(path), raw_norm)
         ex = idx.get(key)
@@ -183,8 +225,14 @@ def _build_region_index_from_items(items: list[dict]) -> Dict[Tuple[Tuple[str, .
             ex_mp = ex.get("price")
             if ex_mp is None or (mp is not None and mp < ex_mp):
                 idx[key] = info
-            elif mp is not None and ex_mp is not None and mp == ex_mp and ex.get("region") is None and region:
-                idx[key] = info
+            elif mp is not None and ex_mp is not None and mp == ex_mp:
+                ex_regs = ex.get("region") or []
+                if not isinstance(ex_regs, list):
+                    ex_regs = [str(ex_regs)]
+                for r in regions:
+                    if r not in ex_regs:
+                        ex_regs.append(r)
+                ex["region"] = ex_regs
 
         raw_stripped = _strip_ram(raw_norm)
         if raw_stripped != raw_norm:
@@ -453,7 +501,11 @@ def _render_variant_line(
             return title
         reg = ""
         if isinstance(payload, dict) and payload.get("min_price") is not None:
-            reg = (payload.get("region_min") or payload.get("region") or "").strip()
+            reg_val = payload.get("region_min") or payload.get("region") or ""
+            if isinstance(reg_val, list):
+                reg = _regions_to_flags(reg_val)
+            else:
+                reg = _regions_to_flags([str(reg_val)])
         if not reg and region_index is not None and model_path:
             key = (tuple(model_path), _norm_key(title))
             info2 = region_index.get(key)
@@ -461,23 +513,27 @@ def _render_variant_line(
                 key = (tuple(model_path), _strip_ram(_norm_key(title)))
                 info2 = region_index.get(key)
             if info2:
-                reg = (info2.get("region") or "").strip()
+                reg_val = info2.get("region") or ""
+                if isinstance(reg_val, list):
+                    reg = _regions_to_flags(reg_val)
+                else:
+                    reg = _regions_to_flags([str(reg_val)])
         if not reg and region_index is not None and model_path:
             best_price = None
-            best_region = ""
+            best_regions: List[str] = []
             for (mpath, _raw_key), info2 in region_index.items():
                 if tuple(mpath) != tuple(model_path):
                     continue
                 if not isinstance(info2, dict):
                     continue
-                reg2 = (info2.get("region") or "").strip()
+                reg2 = info2.get("region") or []
                 price2 = info2.get("price")
                 if reg2:
                     if best_price is None or (price2 is not None and price2 < best_price):
                         best_price = price2
-                        best_region = reg2
-            if best_region:
-                reg = best_region
+                        best_regions = reg2 if isinstance(reg2, list) else [str(reg2)]
+            if best_regions:
+                reg = _regions_to_flags(best_regions)
         if not reg:
             return title
         return f"{reg.upper()} {title}"
