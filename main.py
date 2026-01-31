@@ -231,7 +231,9 @@ def run_bot():
                     rows.append([InlineKeyboardButton(text="💰 Продажи", callback_data="menu:sales")])
                 if _any_access(u, ["external.update_gsheet", "external.competitors"]):
                     rows.append([InlineKeyboardButton(text="📊 Внешние таблицы", callback_data="menu:external")])
-                settings_keys = ["settings.auth", "settings.auto_replies", "settings.accounts", "settings.cm"]
+                if _access_allowed(u, "settings.cm"):
+                    rows.append([InlineKeyboardButton(text="🗂 Управление каналами", callback_data="cm:open")])
+                settings_keys = ["settings.auth", "settings.auto_replies", "settings.accounts"]
                 if u.get("role") == "admin" or u.get("sources_mode") in ("own", "custom"):
                     settings_keys.append("settings.sources")
                 if _any_access(u, settings_keys):
@@ -246,6 +248,7 @@ def run_bot():
                 [InlineKeyboardButton(text="🧾 Товары и цены", callback_data="menu:products")],
                 [InlineKeyboardButton(text="💰 Продажи", callback_data="menu:sales")],
                 [InlineKeyboardButton(text="📊 Внешние таблицы", callback_data="menu:external")],
+                [InlineKeyboardButton(text="🗂 Управление каналами", callback_data="cm:open")],
                 [InlineKeyboardButton(text="⚙️ Настройки", callback_data="menu:settings")],
             ]
             return InlineKeyboardMarkup(inline_keyboard=kb)
@@ -260,6 +263,7 @@ def run_bot():
         ACCESS_GROUPS = [
             ("Главное меню", [
                 ("main.send_request", "📨 Отправить запрос"),
+                ("settings.cm", "🗂 Управление каналами"),
             ]),
             ("Товары и цены", [
                 ("products.catalog", "🛠 Каталог"),
@@ -278,7 +282,6 @@ def run_bot():
                 ("settings.sources", "📡 Источники"),
                 ("settings.auto_replies", "🤖 Автоответы"),
                 ("settings.accounts", "👤 Аккаунты"),
-                ("settings.cm", "🗂 Управление каналами"),
             ]),
         ]
 
@@ -321,8 +324,6 @@ def run_bot():
                 rows.append([InlineKeyboardButton(text="🤖 Автоответы", callback_data="auto_replies")])
             if _access_allowed(u, "settings.accounts"):
                 rows.append([InlineKeyboardButton(text="👤 Аккаунты", callback_data="accounts")])
-            if _access_allowed(u, "settings.cm"):
-                rows.append([InlineKeyboardButton(text="🗂 Управление каналами", callback_data="cm:open")])
             rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")])
             return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -434,7 +435,7 @@ def run_bot():
             if role in ("pending", "rejected"):
                 await callback.message.answer(PENDING_TEXT)
                 return
-            settings_keys = ["settings.auth", "settings.auto_replies", "settings.accounts", "settings.cm"]
+            settings_keys = ["settings.auth", "settings.auto_replies", "settings.accounts"]
             if u.get("role") == "admin" or u.get("sources_mode") in ("own", "custom"):
                 settings_keys.append("settings.sources")
             if not _any_access(u, settings_keys):

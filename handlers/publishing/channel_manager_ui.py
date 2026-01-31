@@ -555,7 +555,24 @@ async def _render_markup_tree(
     tree = _get_catalog_tree_for_publish()
     title = ch.get("title") or ch.get("username") or ch_id
     if current_path:
-        header = "💸 Наценки\n" + " / ".join(current_path)
+        exact = _markup_value_for_path(ch, current_path)
+        eff = exact
+        if eff is None:
+            parts = [p for p in current_path if p]
+            for i in range(len(parts) - 1, 0, -1):
+                v = _markup_value_for_path(ch, parts[:i])
+                if v is not None:
+                    eff = v
+                    break
+        mtype = ch.get("markup_type") or "flat"
+        exact_txt = _format_markup_value(exact, mtype) if exact is not None else "не задана"
+        eff_txt = _format_markup_value(eff, mtype) if eff is not None else "не задана"
+        header = (
+            "💸 Наценки\n"
+            + " / ".join(current_path)
+            + f"\n\nУстановленная наценка: {exact_txt}\n"
+            + f"Эффективная наценка: {eff_txt}"
+        )
     else:
         header = f"💸 Наценки для канала:\n<b>{title}</b>"
 
@@ -1808,7 +1825,23 @@ async def cm_final_start(cb: CallbackQuery, state: FSMContext):
         "Чтобы очистить финальное сообщение и ничего не добавлять — отправьте один дефис <code>-</code>."
     )
 
-    await cb.message.edit_text(prompt, parse_mode="HTML")
+    await cb.message.edit_text(
+        prompt,
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data=f"cm:final_cancel:{ch_id}")]]
+        ),
+    )
+
+
+@router.callback_query(F.data.startswith("cm:final_cancel:"))
+async def cm_final_cancel(cb: CallbackQuery, state: FSMContext):
+    await state.clear()
+    ch_id = cb.data.split(":")[-1]
+    _u, _reg, ch = await _get_channel_for_cb(cb, ch_id)
+    if not ch:
+        return
+    await cb.message.edit_text("Отменено.", reply_markup=InlineKeyboardMarkup(inline_keyboard=_kb_channel(ch)))
 
 
 @router.callback_query(F.data == "noop")
