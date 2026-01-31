@@ -3833,8 +3833,10 @@ def normalize_text_as_goods_item(
 def run_build_parsed_etalon(
     *,
     root_data_path: Path = ROOT_DATA_JSON,
-    out_path: Path = PARSED_ETALON_JSON,
+    out_path: Path | None = None,
 ) -> Dict[str, Any]:
+    if out_path is None:
+        out_path = PARSED_ETALON_JSON
     db = _load_json(root_data_path, {})
     if not isinstance(db, dict):
         db = {}
@@ -4077,11 +4079,15 @@ def ensure_etalon_ready() -> None:
 
 def run_build_parsed_goods(
     *,
-    messages_path: Path = PARSED_MESSAGES_JSON,
-    out_path: Path = PARSED_GOODS_JSON,
+    messages_path: Path | None = None,
+    out_path: Path | None = None,
     ensure_etalon: bool = True,
     run_matcher: bool = True,
 ) -> Dict[str, Any]:
+    if messages_path is None:
+        messages_path = PARSED_MESSAGES_JSON
+    if out_path is None:
+        out_path = PARSED_GOODS_JSON
     if ensure_etalon:
         ensure_etalon_ready()
 
