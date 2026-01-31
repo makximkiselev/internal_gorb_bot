@@ -1334,6 +1334,24 @@ def _append_order_button(btns: List[InlineKeyboardButton], *, enabled: bool, url
     btns.append(InlineKeyboardButton(text="🛒 Заказать", url=url))
 
 
+def _custom_buttons_from_settings(ch_settings: dict, scope: str) -> List[InlineKeyboardButton]:
+    out: List[InlineKeyboardButton] = []
+    items = (ch_settings or {}).get("custom_buttons") or []
+    if not isinstance(items, list):
+        return out
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        if str(it.get("scope") or "all") != scope:
+            continue
+        title = (it.get("title") or "").strip()
+        url = (it.get("url") or "").strip()
+        if not title or not url:
+            continue
+        out.append(InlineKeyboardButton(text=title, url=url))
+    return out
+
+
 async def _ensure_menu_message(
     client,
     entity,
@@ -2030,6 +2048,9 @@ async def _refresh_status_message(
     tz: timezone,
     peer_id: str,
     username: Optional[str],
+    final_btns: Optional[List[InlineKeyboardButton]] = None,
+    aio_bot: Optional[AiogramBot] = None,
+    chat_ref_for_bot: Union[str, int, None] = None,
 ) -> Optional[int]:
     await _delete_all_status_messages(client, entity, existing_index=existing_index)
 
@@ -2037,7 +2058,25 @@ async def _refresh_status_message(
     extra_text = _load_status_extra_for_channel(peer_id, username)
     text = _format_status_text(now, extra_text)
 
-    msg = await safe_send(client, entity, text, parse_mode="HTML")
+    msg = None
+    if final_btns:
+        if aio_bot is not None and chat_ref_for_bot:
+            kb = _aiogram_markup(final_btns)
+            try:
+                msg = await aio_bot.send_message(
+                    chat_id=chat_ref_for_bot,
+                    text=text,
+                    reply_markup=kb,
+                    parse_mode="HTML",
+                )
+            except Exception:
+                msg = None
+        if msg is None:
+            links_block = "\n".join([f"• <a href=\"{b.url}\">{b.text}</a>" for b in final_btns if b.url])
+            full_text = text + ("\n\n" + links_block if links_block else "")
+            msg = await safe_send(client, entity, full_text, parse_mode="HTML")
+    else:
+        msg = await safe_send(client, entity, text, parse_mode="HTML")
     await _throttle()
     if msg:
         existing_index[str(msg.id)] = {
@@ -2089,6 +2128,9 @@ async def sync_channel(
     if pricing_custom and markup_default <= 0.0 and not markup_overrides:
         _log("Pricing rules: no markups set, skip publishing")
         return {"created": 0, "edited": 0, "skipped": 0, "removed": 0, "model_to_mid": {}}
+
+    custom_btns_all = _custom_buttons_from_settings(ch_settings, "all") if ch_settings else []
+    custom_btns_final = _custom_buttons_from_settings(ch_settings, "final") if ch_settings else []
 
     # ====== parsed_data.json: источник цен + channel_pricing ======
     preferred = []
@@ -2450,6 +2492,8 @@ async def sync_channel(
 
             _log(f"   MENU '{cat}/{br}': models_total={len(models)} resolved_mids={resolved} buttons={len(btns)}")
             _append_order_button(btns, enabled=order_enabled, url=order_url)
+            if custom_btns_all:
+                btns.extend(custom_btns_all)
 
             title = f"📱 Модели {cat} / {br}:"
             key = f"{cat}|{br}"
@@ -2484,6 +2528,8 @@ async def sync_channel(
 
         _log(f"  CATEGORY MENU '{cat}': brands_total={len(brands)} linked={linked} -> buttons={len(brand_links)}")
         _append_order_button(brand_links, enabled=order_enabled, url=order_url)
+        if custom_btns_all:
+            brand_links.extend(custom_btns_all)
 
         title = f"🏷️ Бренды в {cat}:"
         old_mid = menu_state["brands"].get(cat)
@@ -2516,6 +2562,8 @@ async def sync_channel(
 
     _log(f"GLOBAL MENU: categories_total={len(cat_list)} linked={linked_cats} -> buttons={len(cat_btns)}")
     _append_order_button(cat_btns, enabled=order_enabled, url=order_url)
+    if custom_btns_all:
+        cat_btns.extend(custom_btns_all)
 
     title = "🧭 Навигация по категориям:"
     old_mid = menu_state.get("categories")
@@ -2544,6 +2592,9 @@ async def sync_channel(
         tz=MOSCOW_TZ,
         peer_id=peer_id,
         username=username,
+        final_btns=custom_btns_final,
+        aio_bot=aio_bot,
+        chat_ref_for_bot=bot_chat_ref,
     )
 
     # ====== save ======

@@ -221,6 +221,9 @@ def _ensure_channel_settings(ch: dict) -> bool:
     if ch.get("publish_time") is None:
         ch["publish_time"] = "12:00"
         changed = True
+    if not isinstance(ch.get("custom_buttons"), list):
+        ch["custom_buttons"] = []
+        changed = True
     return changed
 
 
@@ -343,6 +346,44 @@ def _normalize_order_url(raw: str) -> str:
     return s
 
 
+def _normalize_button_url(raw: str) -> str:
+    return _normalize_order_url(raw)
+
+
+def _get_custom_buttons(ch: dict) -> list[dict]:
+    items = ch.get("custom_buttons") or []
+    if not isinstance(items, list):
+        return []
+    out = []
+    for it in items:
+        if isinstance(it, dict):
+            out.append(it)
+    return out
+
+
+def _save_custom_buttons(ch: dict, items: list[dict]) -> None:
+    ch["custom_buttons"] = items
+
+
+def _find_custom_button(ch: dict, btn_id: str) -> dict | None:
+    for it in _get_custom_buttons(ch):
+        if str(it.get("id")) == str(btn_id):
+            return it
+    return None
+
+
+def _move_custom_button(items: list[dict], btn_id: str, direction: str) -> list[dict]:
+    ids = [str(x.get("id")) for x in items]
+    if str(btn_id) not in ids:
+        return items
+    idx = ids.index(str(btn_id))
+    if direction == "up" and idx > 0:
+        items[idx - 1], items[idx] = items[idx], items[idx - 1]
+    elif direction == "down" and idx < len(items) - 1:
+        items[idx + 1], items[idx] = items[idx], items[idx + 1]
+    return items
+
+
 def _channel_has_any_cover(ch_id: str) -> bool:
     cfg = _load_cover_config()
     ch = cfg.get(str(ch_id)) or {}
@@ -392,6 +433,7 @@ def _kb_channel(ch: dict):
     rows = [
         [InlineKeyboardButton(text="🔄 Обновить цены", callback_data=f"cm:update:{ch['id']}")],
         [InlineKeyboardButton(text="📂 Что публиковать", callback_data=f"cm:publish:{ch['id']}")],
+        [InlineKeyboardButton(text="🧩 Управление меню", callback_data=f"cm:menu_manage:{ch['id']}")],
         [InlineKeyboardButton(text="💸 Настройки цен", callback_data=f"cm:pricing:{ch['id']}")],
         [InlineKeyboardButton(text="📣 Настройки публикации", callback_data=f"cm:pub_settings:{ch['id']}")],
         [InlineKeyboardButton(text="⚙️ Основные настройки", callback_data=f"cm:main_settings:{ch['id']}")],
@@ -664,6 +706,11 @@ class MarkupValueStates(StatesGroup):
     waiting_for_value = State()
 
 
+class MenuButtonStates(StatesGroup):
+    waiting_for_title = State()
+    waiting_for_url = State()
+
+
 _USERNAME_RE = re.compile(r"(?i)^(?:@|https?://t\.me/)(?P<u>[a-z0-9_]{5,})$")
 
 
@@ -859,6 +906,324 @@ async def cm_pricing_settings(cb: CallbackQuery):
         [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"cm:view:{ch_id}")],
     ])
     await cb.message.edit_text(header, reply_markup=kb)
+
+
+# ====== Custom menu buttons management ======
+@router.callback_query(F.data.startswith("cm:menu_manage:"))
+async def cm_menu_manage(cb: CallbackQuery):
+    ch_id = cb.data.split(":")[-1]
+    _u, _reg, ch = await _get_channel_for_cb(cb, ch_id)
+    if not ch:
+        return
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📋 Посмотреть кнопки", callback_data=f"cm:menu_list:{ch_id}")],
+        [InlineKeyboardButton(text="➕ Создать кнопку", callback_data=f"cm:menu_create:{ch_id}")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"cm:view:{ch_id}")],
+    ])
+    await cb.message.edit_text("🧩 Управление меню", reply_markup=kb)
+
+
+def _btn_scope_label(scope: str) -> str:
+    return "все меню" if scope == "all" else "финальное меню"
+
+
+async def _render_buttons_list(cb: CallbackQuery, ch: dict) -> None:
+    items = _get_custom_buttons(ch)
+    kb = []
+    if items:
+        for it in items:
+            scope = _btn_scope_label(str(it.get("scope") or "all"))
+            title = it.get("title") or "Без названия"
+            kb.append([InlineKeyboardButton(text=f"{title} ({scope})", callback_data=f"cm:btn:{ch['id']}:{it.get('id')}")])
+    else:
+        kb.append([InlineKeyboardButton(text="(пусто)", callback_data="noop")])
+    kb.append([InlineKeyboardButton(text="➕ Создать кнопку", callback_data=f"cm:menu_create:{ch['id']}")])
+    kb.append([InlineKeyboardButton(text="🔀 Сортировать", callback_data=f"cm:menu_sort:{ch['id']}")])
+    kb.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"cm:menu_manage:{ch['id']}")])
+    await cb.message.edit_text("📋 Кнопки меню:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+
+
+@router.callback_query(F.data.startswith("cm:menu_list:"))
+async def cm_menu_list(cb: CallbackQuery):
+    ch_id = cb.data.split(":")[-1]
+    _u, _reg, ch = await _get_channel_for_cb(cb, ch_id)
+    if not ch:
+        return
+    await _render_buttons_list(cb, ch)
+
+
+@router.callback_query(F.data.startswith("cm:btn:"))
+async def cm_btn_actions(cb: CallbackQuery):
+    _, _, tail = (cb.data or "").partition("cm:btn:")
+    try:
+        ch_id, btn_id = tail.split(":", 1)
+    except ValueError:
+        await cb.answer("Ошибка", show_alert=True)
+        return
+    _u, _reg, ch = await _get_channel_for_cb(cb, ch_id)
+    if not ch:
+        return
+    btn = _find_custom_button(ch, btn_id)
+    if not btn:
+        await cb.answer("Кнопка не найдена", show_alert=True)
+        return
+    scope = str(btn.get("scope") or "all")
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✏️ Редактировать название", callback_data=f"cm:btn_edit_title:{ch_id}:{btn_id}")],
+        [InlineKeyboardButton(text="🔗 Редактировать ссылку", callback_data=f"cm:btn_edit_url:{ch_id}:{btn_id}")],
+        [InlineKeyboardButton(text="🗑 Удалить", callback_data=f"cm:btn_delete:{ch_id}:{btn_id}")],
+        [InlineKeyboardButton(text=f"Тип кнопки: {_btn_scope_label(scope)}", callback_data=f"cm:btn_scope:{ch_id}:{btn_id}")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"cm:menu_list:{ch_id}")],
+    ])
+    await cb.message.edit_text("Кнопка:", reply_markup=kb)
+
+
+@router.callback_query(F.data.startswith("cm:btn_scope:"))
+async def cm_btn_scope_toggle(cb: CallbackQuery):
+    _, _, tail = (cb.data or "").partition("cm:btn_scope:")
+    try:
+        ch_id, btn_id = tail.split(":", 1)
+    except ValueError:
+        await cb.answer("Ошибка", show_alert=True)
+        return
+    _u, reg, ch = await _get_channel_for_cb(cb, ch_id)
+    if not ch:
+        return
+    btn = _find_custom_button(ch, btn_id)
+    if not btn:
+        await cb.answer("Кнопка не найдена", show_alert=True)
+        return
+    scope = str(btn.get("scope") or "all")
+    btn["scope"] = "final" if scope == "all" else "all"
+    _save_registry(reg)
+    await cm_btn_actions(cb)
+
+
+@router.callback_query(F.data.startswith("cm:btn_delete:"))
+async def cm_btn_delete(cb: CallbackQuery):
+    _, _, tail = (cb.data or "").partition("cm:btn_delete:")
+    try:
+        ch_id, btn_id = tail.split(":", 1)
+    except ValueError:
+        await cb.answer("Ошибка", show_alert=True)
+        return
+    _u, reg, ch = await _get_channel_for_cb(cb, ch_id)
+    if not ch:
+        return
+    items = [it for it in _get_custom_buttons(ch) if str(it.get("id")) != str(btn_id)]
+    _save_custom_buttons(ch, items)
+    _save_registry(reg)
+    await cb.answer("Удалено")
+    await _render_buttons_list(cb, ch)
+
+
+@router.callback_query(F.data.startswith("cm:btn_edit_title:"))
+async def cm_btn_edit_title(cb: CallbackQuery, state: FSMContext):
+    _, _, tail = (cb.data or "").partition("cm:btn_edit_title:")
+    try:
+        ch_id, btn_id = tail.split(":", 1)
+    except ValueError:
+        await cb.answer("Ошибка", show_alert=True)
+        return
+    await state.set_state(MenuButtonStates.waiting_for_title)
+    await state.update_data(ch_id=ch_id, btn_id=btn_id, mode="edit_title")
+    await cb.message.edit_text(
+        "Введите новое название кнопки:",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"cm:btn:{ch_id}:{btn_id}")]]
+        ),
+    )
+
+
+@router.callback_query(F.data.startswith("cm:btn_edit_url:"))
+async def cm_btn_edit_url(cb: CallbackQuery, state: FSMContext):
+    _, _, tail = (cb.data or "").partition("cm:btn_edit_url:")
+    try:
+        ch_id, btn_id = tail.split(":", 1)
+    except ValueError:
+        await cb.answer("Ошибка", show_alert=True)
+        return
+    await state.set_state(MenuButtonStates.waiting_for_url)
+    await state.update_data(ch_id=ch_id, btn_id=btn_id, mode="edit_url")
+    await cb.message.edit_text(
+        "Введите новую ссылку кнопки:",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"cm:btn:{ch_id}:{btn_id}")]]
+        ),
+    )
+
+
+@router.callback_query(F.data.startswith("cm:menu_create:"))
+async def cm_btn_create_start(cb: CallbackQuery, state: FSMContext):
+    ch_id = cb.data.split(":")[-1]
+    await state.set_state(MenuButtonStates.waiting_for_title)
+    await state.update_data(ch_id=ch_id, mode="create")
+    await cb.message.edit_text(
+        "Введите название новой кнопки:",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"cm:menu_manage:{ch_id}")]]
+        ),
+    )
+
+
+@router.message(MenuButtonStates.waiting_for_title)
+async def cm_btn_title_input(msg: Message, state: FSMContext):
+    data = await state.get_data()
+    ch_id = data.get("ch_id")
+    mode = data.get("mode")
+    btn_id = data.get("btn_id")
+    title = (msg.text or "").strip()
+    if not title:
+        await msg.answer("⚠️ Название не может быть пустым.")
+        return
+    if mode == "edit_title" and btn_id:
+        reg = _get_registry()
+        ch = reg.get(str(ch_id)) or reg.get(ch_id)
+        if not ch or not _is_owner(ch, msg.from_user.id):
+            await state.clear()
+            await msg.answer("⛔️ Нет доступа")
+            return
+        btn = _find_custom_button(ch, btn_id)
+        if btn:
+            btn["title"] = title
+            _save_registry(reg)
+        await state.clear()
+        await msg.answer("✅ Название обновлено.", reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"cm:menu_list:{ch_id}")]]
+        ))
+        return
+
+    await state.update_data(title=title)
+    await state.set_state(MenuButtonStates.waiting_for_url)
+    back = f"cm:menu_manage:{ch_id}"
+    await msg.answer(
+        "Введите ссылку для кнопки:",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data=back)]]
+        ),
+    )
+
+
+@router.message(MenuButtonStates.waiting_for_url)
+async def cm_btn_url_input(msg: Message, state: FSMContext):
+    data = await state.get_data()
+    ch_id = data.get("ch_id")
+    mode = data.get("mode")
+    btn_id = data.get("btn_id")
+    title = data.get("title")
+    url = _normalize_button_url(msg.text or "")
+    if not url:
+        await msg.answer("⚠️ Ссылка не может быть пустой.")
+        return
+    reg = _get_registry()
+    ch = reg.get(str(ch_id)) or reg.get(ch_id)
+    if not ch or not _is_owner(ch, msg.from_user.id):
+        await state.clear()
+        await msg.answer("⛔️ Нет доступа")
+        return
+    items = _get_custom_buttons(ch)
+    if mode == "edit_url" and btn_id:
+        btn = _find_custom_button(ch, btn_id)
+        if btn:
+            btn["url"] = url
+    elif mode == "create":
+        new_id = str(int(time.time() * 1000))
+        items.append({"id": new_id, "title": title, "url": url, "scope": "all"})
+        _save_custom_buttons(ch, items)
+        _save_registry(reg)
+        await state.clear()
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Все меню", callback_data=f"cm:btn_scope_set:{ch_id}:{new_id}:all")],
+            [InlineKeyboardButton(text="✅ Финальное меню", callback_data=f"cm:btn_scope_set:{ch_id}:{new_id}:final")],
+        ])
+        await msg.answer(
+            "Выбери режим кнопки:\n\n"
+            "• Все меню — кнопка будет в каждом меню\n"
+            "• Финальное меню — только в финальном меню",
+            reply_markup=kb,
+        )
+        return
+    _save_custom_buttons(ch, items)
+    _save_registry(reg)
+    await state.clear()
+    await msg.answer("✅ Обновлено.", reply_markup=InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"cm:menu_list:{ch_id}")]]
+    ))
+
+
+@router.callback_query(F.data.startswith("cm:btn_scope_set:"))
+async def cm_btn_scope_set(cb: CallbackQuery):
+    _, _, tail = (cb.data or "").partition("cm:btn_scope_set:")
+    try:
+        ch_id, btn_id, scope = tail.split(":", 2)
+    except ValueError:
+        await cb.answer("Ошибка", show_alert=True)
+        return
+    _u, reg, ch = await _get_channel_for_cb(cb, ch_id)
+    if not ch:
+        return
+    btn = _find_custom_button(ch, btn_id)
+    if not btn:
+        await cb.answer("Кнопка не найдена", show_alert=True)
+        return
+    btn["scope"] = "final" if scope == "final" else "all"
+    _save_registry(reg)
+    await cb.answer("Сохранено")
+    await _render_buttons_list(cb, ch)
+
+
+@router.callback_query(F.data.startswith("cm:menu_sort:"))
+async def cm_menu_sort(cb: CallbackQuery):
+    ch_id = cb.data.split(":")[-1]
+    _u, _reg, ch = await _get_channel_for_cb(cb, ch_id)
+    if not ch:
+        return
+    items = _get_custom_buttons(ch)
+    kb = []
+    for i, it in enumerate(items):
+        title = it.get("title") or "Без названия"
+        row = [InlineKeyboardButton(text=title, callback_data="noop")]
+        if i > 0:
+            row.append(InlineKeyboardButton(text="⬆️", callback_data=f"cm:btn_up:{ch_id}:{it.get('id')}"))
+        if i < len(items) - 1:
+            row.append(InlineKeyboardButton(text="⬇️", callback_data=f"cm:btn_down:{ch_id}:{it.get('id')}"))
+        kb.append(row)
+    kb.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"cm:menu_list:{ch_id}")])
+    await cb.message.edit_text("🔀 Сортировка кнопок:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+
+
+@router.callback_query(F.data.startswith("cm:btn_up:"))
+async def cm_btn_move_up(cb: CallbackQuery):
+    _, _, tail = (cb.data or "").partition("cm:btn_up:")
+    try:
+        ch_id, btn_id = tail.split(":", 1)
+    except ValueError:
+        await cb.answer("Ошибка", show_alert=True)
+        return
+    _u, reg, ch = await _get_channel_for_cb(cb, ch_id)
+    if not ch:
+        return
+    items = _move_custom_button(_get_custom_buttons(ch), btn_id, "up")
+    _save_custom_buttons(ch, items)
+    _save_registry(reg)
+    await cm_menu_sort(cb)
+
+
+@router.callback_query(F.data.startswith("cm:btn_down:"))
+async def cm_btn_move_down(cb: CallbackQuery):
+    _, _, tail = (cb.data or "").partition("cm:btn_down:")
+    try:
+        ch_id, btn_id = tail.split(":", 1)
+    except ValueError:
+        await cb.answer("Ошибка", show_alert=True)
+        return
+    _u, reg, ch = await _get_channel_for_cb(cb, ch_id)
+    if not ch:
+        return
+    items = _move_custom_button(_get_custom_buttons(ch), btn_id, "down")
+    _save_custom_buttons(ch, items)
+    _save_registry(reg)
+    await cm_menu_sort(cb)
 
 
 @router.callback_query(F.data.startswith("cm:toggle:"))
