@@ -45,6 +45,8 @@ _PATH_ORDER: List[str] = []
 _PATH_MAX = 8000
 _PATH_SEQ = 0
 
+_REGION_INDEX_CACHE: Dict[str, Tuple[float, Dict[Tuple[Tuple[str, ...], str], Dict[str, Any]]]] = {}
+
 
 def _cache_put(path: List[str]) -> str:
     global _PATH_SEQ
@@ -136,6 +138,101 @@ def _read_matched_items(path: Path) -> list[dict]:
     if isinstance(raw, list):
         return [x for x in raw if isinstance(x, dict)]
     return []
+
+
+def _matched_path_for_user(u: dict | None) -> Path:
+    if not u or u.get("role") == "admin":
+        return DEFAULT_BASE_DIR / "parsed_matched.json"
+    if u.get("role") == "paid_user" and u.get("sources_mode") in ("own", "custom"):
+        return user_data_dir(u["id"]) / "parsed_matched.json"
+    return DEFAULT_BASE_DIR / "parsed_matched.json"
+
+
+def _build_region_index_from_items(items: list[dict]) -> Dict[Tuple[Tuple[str, ...], str], Dict[str, Any]]:
+    idx: Dict[Tuple[Tuple[str, ...], str], Dict[str, Any]] = {}
+    stripped_bucket: Dict[Tuple[Tuple[str, ...], str], List[Dict[str, Any]]] = {}
+
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        path = it.get("path") or []
+        raw = (it.get("raw_parsed") or "").strip()
+        if not isinstance(path, list) or not path:
+            continue
+        if not raw:
+            continue
+        try:
+            mp = float(str(it.get("min_price") or "").replace(" ", ""))
+        except Exception:
+            mp = None
+        params = it.get("params") or {}
+        if not isinstance(params, dict):
+            params = {}
+        region = (params.get("region") or "").strip().lower() or None
+
+        raw_norm = _norm_key(raw)
+        if not raw_norm:
+            continue
+        info = {"price": mp, "region": region}
+
+        key = (tuple(path), raw_norm)
+        ex = idx.get(key)
+        if ex is None:
+            idx[key] = info
+        else:
+            ex_mp = ex.get("price")
+            if ex_mp is None or (mp is not None and mp < ex_mp):
+                idx[key] = info
+            elif mp is not None and ex_mp is not None and mp == ex_mp and ex.get("region") is None and region:
+                idx[key] = info
+
+        raw_stripped = _strip_ram(raw_norm)
+        if raw_stripped != raw_norm:
+            stripped_bucket.setdefault((tuple(path), raw_stripped), []).append(info)
+
+    for key, bucket in stripped_bucket.items():
+        if key in idx:
+            continue
+        if len(bucket) == 1:
+            idx[key] = bucket[0]
+
+    return idx
+
+
+def _build_region_index(matched_path: Path) -> Dict[Tuple[Tuple[str, ...], str], Dict[str, Any]]:
+    try:
+        mtime = matched_path.stat().st_mtime
+    except Exception:
+        return {}
+
+    cache_key = str(matched_path)
+    cached = _REGION_INDEX_CACHE.get(cache_key)
+    if cached and cached[0] == mtime:
+        return cached[1]
+
+    items = _read_matched_items(matched_path)
+    idx = _build_region_index_from_items(items)
+    _REGION_INDEX_CACHE[cache_key] = (mtime, idx)
+    return idx
+
+
+def _get_region_index_for_user(u: dict | None) -> Dict[Tuple[Tuple[str, ...], str], Dict[str, Any]]:
+    base_path = DEFAULT_BASE_DIR / "parsed_matched.json"
+    if not u or u.get("role") == "admin":
+        return _build_region_index(base_path)
+
+    if u.get("role") == "paid_user":
+        mode = (u.get("sources_mode") or "default").strip().lower()
+        user_path = user_data_dir(u["id"]) / "parsed_matched.json"
+        if mode == "own":
+            return _build_region_index(user_path)
+        if mode == "custom":
+            base_items = _read_matched_items(base_path)
+            user_items = _read_matched_items(user_path)
+            return _build_region_index_from_items(base_items + user_items)
+        return _build_region_index(base_path)
+
+    return _build_region_index(base_path)
 
 
 def _ensure_custom_merge(u: dict) -> Path | None:
@@ -334,7 +431,13 @@ def _get_etalon_variant_list_for_model(path_to_model: List[str]) -> Optional[Lis
 # ---------------------------------------------------------------------
 # Rendering
 # ---------------------------------------------------------------------
-def _render_variant_line(variant_title: str, info: Any) -> str:
+def _render_variant_line(
+    variant_title: str,
+    info: Any,
+    *,
+    region_index: Optional[Dict[Tuple[Tuple[str, ...], str], Dict[str, Any]]] = None,
+    model_path: Optional[List[str]] = None,
+) -> str:
     """
     Формат без буллетов:
       "<variant> — <price> ₽ (channels)"
@@ -348,11 +451,17 @@ def _render_variant_line(variant_title: str, info: Any) -> str:
             return title
         if extract_region(title):
             return title
-        if not isinstance(payload, dict):
-            return title
-        if payload.get("min_price") is None:
-            return title
-        reg = (payload.get("region") or "").strip()
+        reg = ""
+        if isinstance(payload, dict) and payload.get("min_price") is not None:
+            reg = (payload.get("region") or "").strip()
+        if not reg and region_index is not None and model_path:
+            key = (tuple(model_path), _norm_key(title))
+            info2 = region_index.get(key)
+            if info2 is None:
+                key = (tuple(model_path), _strip_ram(_norm_key(title)))
+                info2 = region_index.get(key)
+            if info2:
+                reg = (info2.get("region") or "").strip()
         if not reg:
             return title
         return f"{reg.upper()} {title}"
@@ -375,7 +484,12 @@ def _render_variant_line(variant_title: str, info: Any) -> str:
     return f"{vt} — {mp} ₽"
 
 
-def _collect_leaf_lines_for_model(path_to_model: List[str], variants: Dict[str, Any]) -> List[str]:
+def _collect_leaf_lines_for_model(
+    path_to_model: List[str],
+    variants: Dict[str, Any],
+    *,
+    region_index: Optional[Dict[Tuple[Tuple[str, ...], str], Dict[str, Any]]] = None,
+) -> List[str]:
     """
     Варианты по эталону (если есть) с пустыми строками.
     Иначе — как в parsed_data.json (порядок ключей dict).
@@ -387,7 +501,7 @@ def _collect_leaf_lines_for_model(path_to_model: List[str], variants: Dict[str, 
             if title == "":
                 out.append("")
             else:
-                out.append(_render_variant_line(title, {}))
+                out.append(_render_variant_line(title, {}, region_index=region_index, model_path=path_to_model))
         return out
     if not isinstance(variants, dict):
         return ["—"]
@@ -415,7 +529,7 @@ def _collect_leaf_lines_for_model(path_to_model: List[str], variants: Dict[str, 
             if vt_stripped != vt_norm:
                 real_key = vmap.get(vt_stripped)
         info = variants.get(real_key) if real_key is not None else None
-        out.append(_render_variant_line(vt, info))
+        out.append(_render_variant_line(vt, info, region_index=region_index, model_path=path_to_model))
 
     # уберем лишние пустые строки в конце
     while out and out[-1] == "":
@@ -443,14 +557,19 @@ def _collect_models_in_subtree(subtree: Any, base_path: List[str]) -> List[Tuple
     return models
 
 
-def _render_model_message(path_to_model: List[str], variants: Dict[str, Any]) -> str:
+def _render_model_message(
+    path_to_model: List[str],
+    variants: Dict[str, Any],
+    *,
+    region_index: Optional[Dict[Tuple[Tuple[str, ...], str], Dict[str, Any]]] = None,
+) -> str:
     """
     1 сообщение = 1 модель
     """
     lines: List[str] = []
     lines.append(_breadcrumb(path_to_model))
     lines.append("")
-    lines.extend(_collect_leaf_lines_for_model(path_to_model, variants))
+    lines.extend(_collect_leaf_lines_for_model(path_to_model, variants, region_index=region_index))
     txt = "\n".join(lines).rstrip()
     # Telegram лимит — если вдруг модель огромная (крайний случай), режем аккуратно.
     if len(txt) > 3900:
@@ -602,6 +721,7 @@ async def cb_open_prices(callback: CallbackQuery):
 async def cb_home(callback: CallbackQuery):
     u = await auth_get(callback.from_user.id)
     data = _ensure_parsed_data(_parsed_data_path_for_user(u))
+    region_index = _get_region_index_for_user(u)
     root = _get_catalog_root(data)
     children = list(root.keys())
     await callback.message.edit_text(_render_branch_text([]), reply_markup=_kb_home(children))
@@ -641,7 +761,7 @@ async def cb_go(callback: CallbackQuery):
     # leaf -> варианты модели (как 1 модель)
     if _is_model_leaf(node):
         # leaf paging: обычно 1 страница, но оставим навигацию "vp:leaf" на всякий
-        msg = _render_model_message(path, node)
+        msg = _render_model_message(path, node, region_index=region_index)
         await callback.message.edit_text(msg, reply_markup=_kb_leaf(path, page=0, has_prev=False, has_next=False))
         await callback.answer()
         return
@@ -677,6 +797,7 @@ async def cb_all_prices(callback: CallbackQuery):
 
     u = await auth_get(callback.from_user.id)
     data = _ensure_parsed_data(_parsed_data_path_for_user(u))
+    region_index = _get_region_index_for_user(u)
     root = _get_catalog_root(data)
     subtree = _dig(root, branch_path)
 
@@ -719,7 +840,7 @@ async def cb_all_prices(callback: CallbackQuery):
 
     model_path, variants = models[page]
 
-    msg = _render_model_message(model_path, variants)
+    msg = _render_model_message(model_path, variants, region_index=region_index)
     await callback.message.edit_text(
         msg,
         reply_markup=_kb_all_prices(branch_path, page=page, total_pages=total_pages),

@@ -177,6 +177,98 @@ def _read_json(paths: Tuple[Path, ...]) -> tuple[dict, Optional[str]]:
     return {}, None
 
 
+def _read_matched_items(path: Path) -> list[dict]:
+    try:
+        if not path.exists():
+            return []
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    if isinstance(raw, dict):
+        items = raw.get("items") or []
+        return [x for x in items if isinstance(x, dict)]
+    if isinstance(raw, list):
+        return [x for x in raw if isinstance(x, dict)]
+    return []
+
+
+def _norm_key(s: str) -> str:
+    s = (s or "").strip().lower()
+    s = s.replace("\u00A0", " ")
+    while "  " in s:
+        s = s.replace("  ", " ")
+    return s
+
+
+def _strip_ram(s: str) -> str:
+    return re.sub(r"\\b\\d{1,2}\\s*/\\s*(\\d{2,4}\\s*(?:gb|tb))\\b", r"\\1", s)
+
+
+def _build_region_index_from_items(items: list[dict]) -> Dict[Tuple[Tuple[str, ...], str], Dict[str, Any]]:
+    idx: Dict[Tuple[Tuple[str, ...], str], Dict[str, Any]] = {}
+    stripped_bucket: Dict[Tuple[Tuple[str, ...], str], List[Dict[str, Any]]] = {}
+
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        path = it.get("path") or []
+        raw = (it.get("raw_parsed") or "").strip()
+        if not isinstance(path, list) or not path:
+            continue
+        if not raw:
+            continue
+        try:
+            mp = float(str(it.get("min_price") or "").replace(" ", ""))
+        except Exception:
+            mp = None
+        params = it.get("params") or {}
+        if not isinstance(params, dict):
+            params = {}
+        region = (params.get("region") or "").strip().lower() or None
+
+        raw_norm = _norm_key(raw)
+        if not raw_norm:
+            continue
+        info = {"price": mp, "region": region}
+
+        key = (tuple(path), raw_norm)
+        ex = idx.get(key)
+        if ex is None:
+            idx[key] = info
+        else:
+            ex_mp = ex.get("price")
+            if ex_mp is None or (mp is not None and mp < ex_mp):
+                idx[key] = info
+            elif mp is not None and ex_mp is not None and mp == ex_mp and ex.get("region") is None and region:
+                idx[key] = info
+
+        raw_stripped = _strip_ram(raw_norm)
+        if raw_stripped != raw_norm:
+            stripped_bucket.setdefault((tuple(path), raw_stripped), []).append(info)
+
+    for key, bucket in stripped_bucket.items():
+        if key in idx:
+            continue
+        if len(bucket) == 1:
+            idx[key] = bucket[0]
+
+    return idx
+
+
+def _build_region_index_for_user(user_id: Optional[int], sources_mode: str) -> Dict[Tuple[Tuple[str, ...], str], Dict[str, Any]]:
+    base_path = DEFAULT_BASE_DIR / "parsed_matched.json"
+    if not user_id:
+        return _build_region_index_from_items(_read_matched_items(base_path))
+
+    mode = (sources_mode or "default").strip().lower()
+    user_path = user_data_dir(int(user_id)) / "parsed_matched.json"
+    if mode == "own":
+        return _build_region_index_from_items(_read_matched_items(user_path))
+    if mode == "custom":
+        return _build_region_index_from_items(_read_matched_items(base_path) + _read_matched_items(user_path))
+    return _build_region_index_from_items(_read_matched_items(base_path))
+
+
 def _load_parsed_data(preferred_paths: Optional[list[Path]] = None) -> tuple[dict, Optional[str]]:
     """
     parsed_data.json — источник цен (catalog) и channel_pricing.
@@ -937,6 +1029,7 @@ def _render_model_body_from_prices_and_template(
     prices_path: List[str],
     template_list: Optional[List[str]],
     channel_pricing: Optional[Union[str, dict]],
+    region_index: Optional[Dict[Tuple[Tuple[str, ...], str], Dict[str, Any]]] = None,
 ) -> Optional[str]:
     # режим
     if isinstance(channel_pricing, dict):
@@ -988,6 +1081,14 @@ def _render_model_body_from_prices_and_template(
             reg = ""
             if isinstance(payload, dict):
                 reg = (payload.get("region") or "").strip()
+            if not reg and region_index is not None:
+                key = (tuple(prices_path), _norm_key(t))
+                info = region_index.get(key)
+                if info is None:
+                    key = (tuple(prices_path), _strip_ram(_norm_key(t)))
+                    info = region_index.get(key)
+                if info:
+                    reg = (info.get("region") or "").strip()
             if reg:
                 title = f"{reg.upper()} {t}"
         out.append(f"{title} - {_fmt_price_int(adj)}")
@@ -1206,6 +1307,7 @@ def _build_model_text(
     channel_pricing: Optional[Union[str, dict]],
     *,
     text_mode: str = "normal",
+    region_index: Optional[Dict[Tuple[Tuple[str, ...], str], Dict[str, Any]]] = None,
 ) -> Optional[str]:
     template_list = _get_template_list(template_tree, template_path)
     body = _render_model_body_from_prices_and_template(
@@ -1213,6 +1315,7 @@ def _build_model_text(
         prices_path=prices_path,
         template_list=template_list,
         channel_pricing=channel_pricing,
+        region_index=region_index,
     )
     if body is None:
         return None
@@ -1527,6 +1630,7 @@ async def _ensure_model_post(
     peer_id_short: str,
     images_enabled: bool,
     text_mode: str,
+    region_index: Optional[Dict[Tuple[Tuple[str, ...], str], Dict[str, Any]]] = None,
 ) -> tuple[bool, Optional[int], bool]:
     prices_path, template_path = _resolve_paths_for_model(prices_tree, template_tree, cat, brand, model)
     if not prices_path:
@@ -1541,6 +1645,7 @@ async def _ensure_model_post(
         template_path,
         channel_pricing,
         text_mode=text_mode,
+        region_index=region_index,
     )
 
     # Нет цен для opt → удаляем старый пост (если был)
@@ -1703,6 +1808,7 @@ async def _ensure_group_post(
     peer_id_short: str,
     images_enabled: bool,
     text_mode: str,
+    region_index: Optional[Dict[Tuple[Tuple[str, ...], str], Dict[str, Any]]] = None,
 ) -> tuple[bool, Optional[int], bool]:
     segment_texts: List[str] = []
     actual_models: List[str] = []
@@ -1721,6 +1827,7 @@ async def _ensure_group_post(
             template_path,
             channel_pricing,
             text_mode=text_mode,
+            region_index=region_index,
         )
         if text:
             segment_texts.append(text)
@@ -1752,6 +1859,7 @@ async def _ensure_group_post(
             peer_id_short=peer_id_short,
             images_enabled=images_enabled,
             text_mode=text_mode,
+            region_index=region_index,
         )
 
     group_text = "\n\n".join(segment_texts)
@@ -1911,6 +2019,7 @@ async def _ensure_unit_post(
     peer_id_short: str,
     images_enabled: bool,
     text_mode: str,
+    region_index: Optional[Dict[Tuple[Tuple[str, ...], str], Dict[str, Any]]] = None,
 ) -> tuple[bool, Optional[int], bool]:
     """
     Публикует один unit (одна модель или группа).
@@ -1934,6 +2043,7 @@ async def _ensure_unit_post(
             peer_id_short=peer_id_short,
             images_enabled=images_enabled,
             text_mode=text_mode,
+            region_index=region_index,
         )
 
     _log(f"📦 GROUP POST for models={unit} in {cat}/{brand}")
@@ -1951,6 +2061,7 @@ async def _ensure_unit_post(
         peer_id_short=peer_id_short,
         images_enabled=images_enabled,
         text_mode=text_mode,
+        region_index=region_index,
     )
 
 
@@ -2146,6 +2257,7 @@ async def sync_channel(
     if sources_mode == "default":
         parsed, _parsed_src = _load_parsed_data(preferred_paths=[DEFAULT_BASE_DIR / "parsed_data.json"])
     _debug_parsed_shape(parsed)
+    region_index = _build_region_index_for_user(user_id, sources_mode)
 
     prices_tree = _extract_prices_catalog_from_parsed(parsed)
     if not prices_tree:
@@ -2432,6 +2544,7 @@ async def sync_channel(
                         peer_id_short=peer_id_short,
                         images_enabled=images_enabled,
                         text_mode=text_mode,
+                        region_index=region_index,
                     )
                     if changed and mid is not None:
                         edited += 1 if was_existing else 0
@@ -2457,6 +2570,7 @@ async def sync_channel(
                         peer_id_short=peer_id_short,
                         images_enabled=images_enabled,
                         text_mode=text_mode,
+                        region_index=region_index,
                     )
                     if changed and mid is not None:
                         edited += 1 if was_existing else 0
