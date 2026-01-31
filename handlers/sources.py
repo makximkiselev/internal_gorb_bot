@@ -6,7 +6,7 @@ from handlers.auth_utils import auth_get
 from aiogram.types import CallbackQuery, Message, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
-from telethon_manager import get_all_clients, get_clients_for_user
+from telethon_manager import get_all_clients, get_clients_for_user, get_paid_client
 
 router = Router()
 
@@ -226,7 +226,19 @@ def _build_selection_keyboard(found, src_type: str, selected: set[int]):
 
 # === Обработка выбора и отображения ===
 async def _handle_search_results(msg: Message, state: FSMContext, src_type: str, query: str, user_id: int | None = None):
-    found = await _search_dialogs(query, src_type, user_id=user_id)
+    search_user_id = user_id
+    if user_id is not None:
+        ctx = await _get_user_ctx(user_id)
+        is_admin = ctx.get("role") == "admin"
+        if is_admin:
+            search_user_id = None
+        else:
+            client = await get_paid_client(user_id)
+            if not client:
+                await msg.answer("⚠️ Сессия не авторизована. Пройди регистрацию и попробуй снова.")
+                await state.clear()
+                return
+    found = await _search_dialogs(query, src_type, user_id=search_user_id)
     if not found:
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🔁 Повторить поиск", callback_data=f"add_{src_type}")],
