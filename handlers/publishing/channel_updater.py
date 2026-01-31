@@ -1328,12 +1328,6 @@ def _aiogram_markup(btns: List[InlineKeyboardButton]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def _append_order_button(btns: List[InlineKeyboardButton], *, enabled: bool, url: str) -> None:
-    if not enabled or not url:
-        return
-    btns.append(InlineKeyboardButton(text="🛒 Заказать", url=url))
-
-
 def _custom_buttons_from_settings(ch_settings: dict, scope: str) -> List[InlineKeyboardButton]:
     out: List[InlineKeyboardButton] = []
     items = (ch_settings or {}).get("custom_buttons") or []
@@ -2116,8 +2110,6 @@ async def sync_channel(
     images_enabled = (channel_mode == "retail") if img_flag is None else bool(img_flag)
     text_mode = (ch_settings.get("text_mode") if ch_settings else None) or "normal"
     round_step = 1000 if bool(ch_settings.get("round_prices")) else 0
-    order_url = (ch_settings.get("order_button_url") or "").strip() if ch_settings else ""
-    order_enabled = bool(ch_settings.get("order_button_enabled")) and bool(order_url) if ch_settings else False
     pricing_custom = bool(ch_settings.get("pricing_custom")) if ch_settings else False
     markup_type = (ch_settings.get("markup_type") if ch_settings else None) or "flat"
     markup_default = float(ch_settings.get("markup_default") or 0.0) if ch_settings else 0.0
@@ -2491,7 +2483,6 @@ async def sync_channel(
                 i = j
 
             _log(f"   MENU '{cat}/{br}': models_total={len(models)} resolved_mids={resolved} buttons={len(btns)}")
-            _append_order_button(btns, enabled=order_enabled, url=order_url)
             if custom_btns_all:
                 btns.extend(custom_btns_all)
 
@@ -2527,7 +2518,6 @@ async def sync_channel(
                 brand_links.append(InlineKeyboardButton(text=br, url=_url(mid_menu)))
 
         _log(f"  CATEGORY MENU '{cat}': brands_total={len(brands)} linked={linked} -> buttons={len(brand_links)}")
-        _append_order_button(brand_links, enabled=order_enabled, url=order_url)
         if custom_btns_all:
             brand_links.extend(custom_btns_all)
 
@@ -2561,7 +2551,6 @@ async def sync_channel(
             cat_btns.append(InlineKeyboardButton(text=cat, url=_url(mid_brand_menu)))
 
     _log(f"GLOBAL MENU: categories_total={len(cat_list)} linked={linked_cats} -> buttons={len(cat_btns)}")
-    _append_order_button(cat_btns, enabled=order_enabled, url=order_url)
     if custom_btns_all:
         cat_btns.extend(custom_btns_all)
 

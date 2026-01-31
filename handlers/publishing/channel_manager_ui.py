@@ -200,12 +200,6 @@ def _ensure_channel_settings(ch: dict) -> bool:
     if ch.get("round_prices") is None:
         ch["round_prices"] = False
         changed = True
-    if ch.get("order_button_enabled") is None:
-        ch["order_button_enabled"] = False
-        changed = True
-    if ch.get("order_button_url") is None:
-        ch["order_button_url"] = ""
-        changed = True
     if ch.get("markup_type") not in ("pct", "flat"):
         ch["markup_type"] = "flat"
         changed = True
@@ -331,7 +325,7 @@ def _safe_filename(s: str) -> str:
     return s.strip(" ._")[:120] or "cover"
 
 
-def _normalize_order_url(raw: str) -> str:
+def _normalize_button_url(raw: str) -> str:
     s = (raw or "").strip()
     if not s:
         return ""
@@ -344,10 +338,6 @@ def _normalize_order_url(raw: str) -> str:
     if re.fullmatch(r"[a-zA-Z0-9_]{5,}", s):
         return f"https://t.me/{s}"
     return s
-
-
-def _normalize_button_url(raw: str) -> str:
-    return _normalize_order_url(raw)
 
 
 def _get_custom_buttons(ch: dict) -> list[dict]:
@@ -446,7 +436,6 @@ def _kb_channel(ch: dict):
 def _kb_main_settings(ch: dict) -> InlineKeyboardMarkup:
     t = ch.get("type", "opt")
     images_on = bool(ch.get("images_enabled"))
-    order_on = bool(ch.get("order_button_enabled"))
     text_mode = ch.get("text_mode", "normal")
     round_on = bool(ch.get("round_prices"))
     ann_on = bool(ch.get("daily_announce"))
@@ -461,11 +450,6 @@ def _kb_main_settings(ch: dict) -> InlineKeyboardMarkup:
             callback_data=f"cm:img_toggle:{ch['id']}"
         )],
         [InlineKeyboardButton(text="🖼 Управление картинками", callback_data=f"cm:images:{ch['id']}")],
-        [InlineKeyboardButton(
-            text=f"Кнопка «Заказать»: {'вкл' if order_on else 'выкл'}",
-            callback_data=f"cm:order_toggle:{ch['id']}"
-        )],
-        [InlineKeyboardButton(text="🔗 Ссылка для «Заказать»", callback_data=f"cm:order_link:{ch['id']}")],
         [InlineKeyboardButton(
             text=f"Режим текста: {'копирование' if text_mode == 'copy' else 'обычный'}",
             callback_data=f"cm:text_toggle:{ch['id']}"
@@ -698,10 +682,6 @@ class PublishTimeStates(StatesGroup):
     waiting_for_time = State()
 
 
-class OrderLinkStates(StatesGroup):
-    waiting_for_link = State()
-
-
 class MarkupValueStates(StatesGroup):
     waiting_for_value = State()
 
@@ -855,7 +835,6 @@ async def cm_view(cb: CallbackQuery):
         f"<b>{ch.get('title') or ch.get('username') or ch_id}</b>\n"
         f"Тип: {'Оптовый' if ch.get('type') == 'opt' else 'Розничный'}\n"
         f"Картинки: {'вкл' if ch.get('images_enabled') else 'выкл'}\n"
-        f"Кнопка «Заказать»: {'вкл' if ch.get('order_button_enabled') else 'выкл'}\n"
         f"Текст: {'копирование' if ch.get('text_mode') == 'copy' else 'обычный'}\n"
         f"Округление: {'вкл' if ch.get('round_prices') else 'выкл'}\n"
         f"Что публиковать: {selected_count} выбранных веток каталога"
@@ -1283,69 +1262,6 @@ async def cm_confirm_images(cb: CallbackQuery):
     await cm_main_settings(cb)
 
 
-@router.callback_query(F.data.startswith("cm:order_toggle:"))
-async def cm_toggle_order(cb: CallbackQuery, state: FSMContext):
-    ch_id = cb.data.split(":")[-1]
-    _u, reg, ch = await _get_channel_for_cb(cb, ch_id)
-    if not ch:
-        return
-    enable = not bool(ch.get("order_button_enabled"))
-    if enable and not (ch.get("order_button_url") or "").strip():
-        await state.set_state(OrderLinkStates.waiting_for_link)
-        await state.update_data(ch_id=ch_id)
-        await cb.message.edit_text(
-            "🔗 Укажи ссылку для кнопки «Заказать».\n"
-            "Можно @username или ссылку t.me/username.",
-            reply_markup=InlineKeyboardMarkup(
-                inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"cm:main_settings:{ch_id}")]]
-            ),
-        )
-        return
-    ch["order_button_enabled"] = enable
-    _save_registry(reg)
-    await cm_main_settings(cb)
-
-
-@router.callback_query(F.data.startswith("cm:order_link:"))
-async def cm_order_link(cb: CallbackQuery, state: FSMContext):
-    ch_id = cb.data.split(":")[-1]
-    _u, _reg, ch = await _get_channel_for_cb(cb, ch_id)
-    if not ch:
-        return
-    await state.set_state(OrderLinkStates.waiting_for_link)
-    await state.update_data(ch_id=ch_id)
-    await cb.message.edit_text(
-        "🔗 Укажи ссылку для кнопки «Заказать».\n"
-        "Можно @username или ссылку t.me/username.",
-        reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"cm:main_settings:{ch_id}")]]
-        ),
-    )
-
-
-@router.message(OrderLinkStates.waiting_for_link)
-async def cm_order_link_save(msg: Message, state: FSMContext):
-    data = await state.get_data()
-    ch_id = data.get("ch_id")
-    if not ch_id:
-        await state.clear()
-        await msg.answer("Канал не найден. Откройте меню снова.")
-        return
-    reg = _get_registry()
-    ch = reg.get(str(ch_id)) or reg.get(ch_id)
-    if not ch:
-        await state.clear()
-        await msg.answer("Канал не найден. Откройте меню снова.")
-        return
-    url = _normalize_order_url(msg.text or "")
-    if not url:
-        await msg.answer("⚠️ Ссылка пустая. Введи ещё раз.")
-        return
-    ch["order_button_url"] = url
-    ch["order_button_enabled"] = True
-    _save_registry(reg)
-    await state.clear()
-    await msg.answer("✅ Ссылка для кнопки «Заказать» сохранена.", reply_markup=_kb_main_settings(ch))
 
 
 @router.callback_query(F.data.startswith("cm:text_toggle:"))
