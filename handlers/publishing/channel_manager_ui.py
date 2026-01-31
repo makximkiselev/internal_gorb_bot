@@ -145,8 +145,7 @@ def _is_owner(ch: dict, user_id: int | None) -> bool:
 
 
 def _filter_registry_for_user(reg: dict, user_id: int | None, is_admin: bool) -> dict:
-    if is_admin:
-        return reg
+    _ = is_admin
     return {k: v for k, v in reg.items() if isinstance(v, dict) and _is_owner(v, user_id)}
 
 
@@ -168,10 +167,48 @@ async def _get_channel_for_cb(cb: CallbackQuery, ch_id: str) -> tuple[Optional[d
     if not ch:
         await cb.answer("Канал не найден", show_alert=True)
         return u, reg, None
-    if u.get("role") != "admin" and not _is_owner(ch, cb.from_user.id):
+    if _ensure_channel_settings(ch):
+        _save_registry(reg)
+    if not _is_owner(ch, cb.from_user.id):
         await cb.answer("⛔️ Нет доступа", show_alert=True)
         return u, reg, None
     return u, reg, ch
+
+
+def _ensure_channel_settings(ch: dict) -> bool:
+    changed = False
+    t = ch.get("type") or "opt"
+    if ch.get("images_enabled") is None:
+        ch["images_enabled"] = True if t == "retail" else False
+        changed = True
+    if ch.get("text_mode") not in ("normal", "copy"):
+        ch["text_mode"] = "normal"
+        changed = True
+    if ch.get("round_prices") is None:
+        ch["round_prices"] = False
+        changed = True
+    if ch.get("order_button_enabled") is None:
+        ch["order_button_enabled"] = False
+        changed = True
+    if ch.get("order_button_url") is None:
+        ch["order_button_url"] = ""
+        changed = True
+    if ch.get("markup_type") not in ("pct", "flat"):
+        ch["markup_type"] = "flat"
+        changed = True
+    if ch.get("markup_default") is None:
+        ch["markup_default"] = 0
+        changed = True
+    if not isinstance(ch.get("markup_values"), dict):
+        ch["markup_values"] = {}
+        changed = True
+    if ch.get("pricing_custom") is None:
+        ch["pricing_custom"] = False
+        changed = True
+    if ch.get("publish_time") is None:
+        ch["publish_time"] = "12:00"
+        changed = True
+    return changed
 
 
 def _purge_channel_data(peer_id: str) -> None:
@@ -278,6 +315,28 @@ def _safe_filename(s: str) -> str:
     return s.strip(" ._")[:120] or "cover"
 
 
+def _normalize_order_url(raw: str) -> str:
+    s = (raw or "").strip()
+    if not s:
+        return ""
+    if s.startswith("@"):
+        s = s[1:]
+    if s.startswith("https://t.me/") or s.startswith("http://t.me/"):
+        return s.replace("http://", "https://", 1)
+    if s.startswith("t.me/"):
+        return "https://" + s
+    if re.fullmatch(r"[a-zA-Z0-9_]{5,}", s):
+        return f"https://t.me/{s}"
+    return s
+
+
+def _channel_has_any_cover(ch_id: str) -> bool:
+    cfg = _load_cover_config()
+    ch = cfg.get(str(ch_id)) or {}
+    by_path = ch.get("by_path") or {}
+    return bool(by_path)
+
+
 def _load_publish_config() -> dict:
     try:
         if not PUBLISH_CONFIG_FILE.exists():
@@ -317,36 +376,197 @@ def _kb_main(reg: dict):
 
 
 def _kb_channel(ch: dict):
-    t = ch.get("type", "opt")
-
     rows = [
         [InlineKeyboardButton(text="🔄 Обновить цены", callback_data=f"cm:update:{ch['id']}")],
-        [InlineKeyboardButton(text="🙈 Скрытие цен", callback_data=f"cm:hide_menu:{ch['id']}")],
         [InlineKeyboardButton(text="📂 Что публиковать", callback_data=f"cm:publish:{ch['id']}")],
-        [InlineKeyboardButton(text="✏️ Финальное сообщение", callback_data=f"cm:final:{ch['id']}")],
-    ]
-
-    if t != "opt":
-        rows = [r for r in rows if "cm:hide_menu:" not in r[0].callback_data]
-        rows.append([InlineKeyboardButton(text="🖼 Добавить картинки", callback_data=f"cm:images:{ch['id']}")])
-
-    rows += [
+        [InlineKeyboardButton(text="💸 Настройки цен", callback_data=f"cm:pricing:{ch['id']}")],
+        [InlineKeyboardButton(text="📣 Настройки публикации", callback_data=f"cm:pub_settings:{ch['id']}")],
+        [InlineKeyboardButton(text="⚙️ Основные настройки", callback_data=f"cm:main_settings:{ch['id']}")],
         [InlineKeyboardButton(text="🗑 Удалить канал", callback_data=f"cm:del:{ch['id']}")],
-        [
-            InlineKeyboardButton(
-                text=f"Тип канала: {'Оптовый' if t == 'opt' else 'Розничный'} (изменить)",
-                callback_data=f"cm:toggle:{ch['id']}",
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                text=f"Ежедневное уведомление: {'вкл' if ch.get('daily_announce') else 'выкл'} (перекл.)",
-                callback_data=f"cm:toggle_ann:{ch['id']}",
-            )
-        ],
         [InlineKeyboardButton(text="⬅️ К списку каналов", callback_data="cm:open")],
     ]
     return rows
+
+
+def _kb_main_settings(ch: dict) -> InlineKeyboardMarkup:
+    t = ch.get("type", "opt")
+    images_on = bool(ch.get("images_enabled"))
+    order_on = bool(ch.get("order_button_enabled"))
+    text_mode = ch.get("text_mode", "normal")
+    round_on = bool(ch.get("round_prices"))
+    ann_on = bool(ch.get("daily_announce"))
+
+    rows = [
+        [InlineKeyboardButton(
+            text=f"Тип канала: {'Оптовый' if t == 'opt' else 'Розничный'} (изменить)",
+            callback_data=f"cm:toggle:{ch['id']}"
+        )],
+        [InlineKeyboardButton(
+            text=f"Режим с картинками: {'вкл' if images_on else 'выкл'}",
+            callback_data=f"cm:img_toggle:{ch['id']}"
+        )],
+        [InlineKeyboardButton(text="🖼 Управление картинками", callback_data=f"cm:images:{ch['id']}")],
+        [InlineKeyboardButton(
+            text=f"Кнопка «Заказать»: {'вкл' if order_on else 'выкл'}",
+            callback_data=f"cm:order_toggle:{ch['id']}"
+        )],
+        [InlineKeyboardButton(text="🔗 Ссылка для «Заказать»", callback_data=f"cm:order_link:{ch['id']}")],
+        [InlineKeyboardButton(
+            text=f"Режим текста: {'копирование' if text_mode == 'copy' else 'обычный'}",
+            callback_data=f"cm:text_toggle:{ch['id']}"
+        )],
+        [InlineKeyboardButton(
+            text=f"Округление цен: {'вкл' if round_on else 'выкл'}",
+            callback_data=f"cm:round_toggle:{ch['id']}"
+        )],
+        [InlineKeyboardButton(
+            text=f"Ежедневное уведомление: {'вкл' if ann_on else 'выкл'}",
+            callback_data=f"cm:toggle_ann:{ch['id']}"
+        )],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"cm:view:{ch['id']}")],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _kb_publish_settings(ch: dict) -> InlineKeyboardMarkup:
+    ht = ch.get("hide_time") or "20:00"
+    pt = ch.get("publish_time") or "12:00"
+    rows = [
+        [InlineKeyboardButton(text="🔄 Обновить цены", callback_data=f"cm:update:{ch['id']}")],
+        [InlineKeyboardButton(text=f"⏰ Время публикации: {pt}", callback_data=f"cm:pub_time:{ch['id']}")],
+        [InlineKeyboardButton(text="🙈 Скрыть цены сейчас", callback_data=f"cm:hide:{ch['id']}")],
+        [InlineKeyboardButton(text=f"⏰ Время скрытия: {ht}", callback_data=f"cm:hide_time:{ch['id']}")],
+        [InlineKeyboardButton(text="✏️ Финальное сообщение", callback_data=f"cm:final:{ch['id']}")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"cm:view:{ch['id']}")],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _format_markup_value(val: float, mtype: str) -> str:
+    if mtype == "pct":
+        return f"{val:.2f}%".replace(".00", "")
+    return f"{int(round(val))} руб"
+
+
+def _markup_key(path: list[str]) -> str:
+    return "|".join([p for p in (path or []) if p])
+
+
+def _markup_value_for_path(ch: dict, path: list[str]) -> Optional[float]:
+    key = _markup_key(path)
+    if not key:
+        return None
+    mv = ch.get("markup_values") or {}
+    if not isinstance(mv, dict):
+        return None
+    try:
+        return float(mv.get(key))
+    except Exception:
+        return None
+
+
+def _markup_values_in_subtree(ch: dict, path: list[str]) -> list[float]:
+    mv = ch.get("markup_values") or {}
+    if not isinstance(mv, dict):
+        return []
+    prefix = _markup_key(path)
+    pref = prefix + "|" if prefix else ""
+    vals = []
+    for k, v in mv.items():
+        if not isinstance(k, str):
+            continue
+        if prefix and not k.startswith(pref):
+            continue
+        if not prefix and not k:
+            continue
+        try:
+            vals.append(float(v))
+        except Exception:
+            continue
+    return vals
+
+
+def _build_markup_tree_keyboard(
+    tree: dict,
+    current_path: list[str],
+    ch: dict,
+    ch_id: str,
+) -> InlineKeyboardMarkup:
+    node = _get_node_by_path_for_publish(tree, current_path)
+    rows: list[list[InlineKeyboardButton]] = []
+    mtype = ch.get("markup_type") or "flat"
+
+    if isinstance(node, (dict, list)) and node:
+        if _is_model_level_node(node):
+            rows.append([InlineKeyboardButton(text="(Это уровень модели — ниже SKU скрыты)", callback_data="noop")])
+        else:
+            for name in _iter_node_keys_ordered(node):
+                if str(name).startswith("_"):
+                    continue
+                child_path = current_path + [str(name)]
+                exact = _markup_value_for_path(ch, child_path)
+                subtree = _markup_values_in_subtree(ch, child_path)
+                suffix = ""
+                if exact is not None:
+                    suffix = f" = {_format_markup_value(exact, mtype)}"
+                elif subtree:
+                    uniq = sorted({float(x) for x in subtree})
+                    if len(uniq) > 1:
+                        suffix = f" от {_format_markup_value(min(uniq), mtype)}"
+                    else:
+                        suffix = f" от {_format_markup_value(uniq[0], mtype)}"
+
+                raw_path = "|".join(child_path)
+                tok = _cache_path("mk", ch_id, raw_path)
+                rows.append([
+                    InlineKeyboardButton(text=f"📁 {name}{suffix}", callback_data=f"cm_mk_open:{ch_id}:{tok}")
+                ])
+    else:
+        rows.append([InlineKeyboardButton(text="(Нет дочерних категорий)", callback_data="noop")])
+
+    if current_path:
+        raw_cur = "|".join(current_path)
+        tok_cur = _cache_path("mk", ch_id, raw_cur)
+        rows.append([InlineKeyboardButton(text="✏️ Установить наценку для этого узла", callback_data=f"cm_mk_set:{ch_id}:{tok_cur}")])
+        if _markup_value_for_path(ch, current_path) is not None:
+            rows.append([InlineKeyboardButton(text="🗑 Удалить наценку этого узла", callback_data=f"cm_mk_del:{ch_id}:{tok_cur}")])
+
+    nav_row: list[InlineKeyboardButton] = []
+    if current_path:
+        parent_raw = "|".join(current_path[:-1])
+        tok_parent = _cache_path("mk", ch_id, parent_raw)
+        nav_row.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"cm_mk_back:{ch_id}:{tok_parent}"))
+    else:
+        nav_row.append(InlineKeyboardButton(text="⬅️ К настройкам цен", callback_data=f"cm:pricing:{ch_id}"))
+    rows.append(nav_row)
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def _render_markup_tree(
+    callback: CallbackQuery,
+    ch_id: str,
+    current_path: list[str],
+    *,
+    edit: bool = True,
+):
+    _u, _reg, ch = await _get_channel_for_cb(callback, ch_id)
+    if not ch:
+        return
+    tree = _get_catalog_tree_for_publish()
+    title = ch.get("title") or ch.get("username") or ch_id
+    if current_path:
+        header = "💸 Наценки\n" + " / ".join(current_path)
+    else:
+        header = f"💸 Наценки для канала:\n<b>{title}</b>"
+
+    markup = _build_markup_tree_keyboard(tree, current_path, ch, ch_id)
+    try:
+        if edit:
+            await callback.message.edit_text(header, reply_markup=markup, parse_mode="HTML")
+        else:
+            await callback.message.answer(header, reply_markup=markup, parse_mode="HTML")
+    except Exception:
+        await callback.message.answer(header, reply_markup=markup, parse_mode="HTML")
 
 
 def _kb_add_cancel():
@@ -387,6 +607,18 @@ class FinalMessageStates(StatesGroup):
 
 class HideTimeStates(StatesGroup):
     waiting_for_time = State()
+
+
+class PublishTimeStates(StatesGroup):
+    waiting_for_time = State()
+
+
+class OrderLinkStates(StatesGroup):
+    waiting_for_link = State()
+
+
+class MarkupValueStates(StatesGroup):
+    waiting_for_value = State()
 
 
 _USERNAME_RE = re.compile(r"(?i)^(?:@|https?://t\.me/)(?P<u>[a-z0-9_]{5,})$")
@@ -463,12 +695,11 @@ async def cm_add_handle_input(msg: Message, state: FSMContext):
         existed = reg.get(peer_id, {})
         u = await auth_get(msg.from_user.id)
         is_admin = (u or {}).get("role") == "admin"
-        if not is_admin and existed and not _is_owner(existed, msg.from_user.id):
+        if existed and not _is_owner(existed, msg.from_user.id):
             await msg.answer("⛔️ Этот канал уже закреплён за другим пользователем.")
             return
         existed.update(info)
-        if not is_admin:
-            existed["user_id"] = msg.from_user.id
+        existed["user_id"] = msg.from_user.id
         reg[peer_id] = existed
         _save_registry(reg)
 
@@ -495,6 +726,14 @@ async def cm_open(cb: CallbackQuery):
     if not u:
         return
     reg = _get_registry()
+    if u.get("role") == "admin":
+        changed = False
+        for _cid, ch in reg.items():
+            if isinstance(ch, dict) and ch.get("user_id") is None:
+                ch["user_id"] = cb.from_user.id
+                changed = True
+        if changed:
+            _save_registry(reg)
     reg = _filter_registry_for_user(reg, cb.from_user.id, u.get("role") == "admin")
     await cb.message.edit_text(
         "📣 Управление каналами:\nВыберите канал для действий.",
@@ -521,7 +760,10 @@ async def cm_view(cb: CallbackQuery):
     txt = (
         f"<b>{ch.get('title') or ch.get('username') or ch_id}</b>\n"
         f"Тип: {'Оптовый' if ch.get('type') == 'opt' else 'Розничный'}\n"
-        f"Ежедневное уведомление: {'вкл' if ch.get('daily_announce') else 'выкл'}\n"
+        f"Картинки: {'вкл' if ch.get('images_enabled') else 'выкл'}\n"
+        f"Кнопка «Заказать»: {'вкл' if ch.get('order_button_enabled') else 'выкл'}\n"
+        f"Текст: {'копирование' if ch.get('text_mode') == 'copy' else 'обычный'}\n"
+        f"Округление: {'вкл' if ch.get('round_prices') else 'выкл'}\n"
         f"Что публиковать: {selected_count} выбранных веток каталога"
     )
 
@@ -532,6 +774,46 @@ async def cm_view(cb: CallbackQuery):
     )
 
 
+@router.callback_query(F.data.startswith("cm:main_settings:"))
+async def cm_main_settings(cb: CallbackQuery):
+    ch_id = cb.data.split(":")[-1]
+    _u, _reg, ch = await _get_channel_for_cb(cb, ch_id)
+    if not ch:
+        return
+    await cb.message.edit_text("⚙️ Основные настройки", reply_markup=_kb_main_settings(ch))
+
+
+@router.callback_query(F.data.startswith("cm:pub_settings:"))
+async def cm_publish_settings(cb: CallbackQuery):
+    ch_id = cb.data.split(":")[-1]
+    _u, _reg, ch = await _get_channel_for_cb(cb, ch_id)
+    if not ch:
+        return
+    await cb.message.edit_text("📣 Настройки публикации", reply_markup=_kb_publish_settings(ch))
+
+
+@router.callback_query(F.data.startswith("cm:pricing:"))
+async def cm_pricing_settings(cb: CallbackQuery):
+    ch_id = cb.data.split(":")[-1]
+    _u, _reg, ch = await _get_channel_for_cb(cb, ch_id)
+    if not ch:
+        return
+    mtype = ch.get("markup_type") or "flat"
+    mval = ch.get("markup_default") or 0
+    header = (
+        "💸 Настройки цен\n\n"
+        f"Тип наценки: {'процентный' if mtype == 'pct' else 'рублевый'}\n"
+        f"Наценка по умолчанию: {_format_markup_value(float(mval), mtype)}"
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Тип наценки (сменить)", callback_data=f"cm:markup_type:{ch_id}")],
+        [InlineKeyboardButton(text="Наценка по умолчанию (задать)", callback_data=f"cm:markup_default:{ch_id}")],
+        [InlineKeyboardButton(text="Настроить наценку по каталогу", callback_data=f"cm_mk_root:{ch_id}")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"cm:view:{ch_id}")],
+    ])
+    await cb.message.edit_text(header, reply_markup=kb)
+
+
 @router.callback_query(F.data.startswith("cm:toggle:"))
 async def cm_toggle_type(cb: CallbackQuery):
     ch_id = cb.data.split(":")[-1]
@@ -540,7 +822,7 @@ async def cm_toggle_type(cb: CallbackQuery):
         return
     ch["type"] = "retail" if ch.get("type") == "opt" else "opt"
     _save_registry(reg)
-    await cm_view(cb)
+    await cm_main_settings(cb)
 
 
 @router.callback_query(F.data.startswith("cm:toggle_ann:"))
@@ -551,7 +833,290 @@ async def cm_toggle_ann(cb: CallbackQuery):
         return
     ch["daily_announce"] = not ch.get("daily_announce", True)
     _save_registry(reg)
-    await cm_view(cb)
+    await cm_main_settings(cb)
+
+
+@router.callback_query(F.data.startswith("cm:img_toggle:"))
+async def cm_toggle_images(cb: CallbackQuery):
+    ch_id = cb.data.split(":")[-1]
+    _u, reg, ch = await _get_channel_for_cb(cb, ch_id)
+    if not ch:
+        return
+    enable = not bool(ch.get("images_enabled"))
+    if enable and not _channel_has_any_cover(ch_id):
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Продолжить без картинок", callback_data=f"cm:img_confirm:{ch_id}")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"cm:main_settings:{ch_id}")],
+        ])
+        await cb.message.edit_text(
+            "⚠️ Для этого канала нет загруженных картинок.\n"
+            "Если включить режим с картинками — публикации будут без картинок.\n"
+            "Продолжить?",
+            reply_markup=kb,
+        )
+        return
+    ch["images_enabled"] = enable
+    _save_registry(reg)
+    await cm_main_settings(cb)
+
+
+@router.callback_query(F.data.startswith("cm:img_confirm:"))
+async def cm_confirm_images(cb: CallbackQuery):
+    ch_id = cb.data.split(":")[-1]
+    _u, reg, ch = await _get_channel_for_cb(cb, ch_id)
+    if not ch:
+        return
+    ch["images_enabled"] = True
+    _save_registry(reg)
+    await cm_main_settings(cb)
+
+
+@router.callback_query(F.data.startswith("cm:order_toggle:"))
+async def cm_toggle_order(cb: CallbackQuery, state: FSMContext):
+    ch_id = cb.data.split(":")[-1]
+    _u, reg, ch = await _get_channel_for_cb(cb, ch_id)
+    if not ch:
+        return
+    enable = not bool(ch.get("order_button_enabled"))
+    if enable and not (ch.get("order_button_url") or "").strip():
+        await state.set_state(OrderLinkStates.waiting_for_link)
+        await state.update_data(ch_id=ch_id)
+        await cb.message.edit_text(
+            "🔗 Укажи ссылку для кнопки «Заказать».\n"
+            "Можно @username или ссылку t.me/username.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"cm:main_settings:{ch_id}")]]
+            ),
+        )
+        return
+    ch["order_button_enabled"] = enable
+    _save_registry(reg)
+    await cm_main_settings(cb)
+
+
+@router.callback_query(F.data.startswith("cm:order_link:"))
+async def cm_order_link(cb: CallbackQuery, state: FSMContext):
+    ch_id = cb.data.split(":")[-1]
+    _u, _reg, ch = await _get_channel_for_cb(cb, ch_id)
+    if not ch:
+        return
+    await state.set_state(OrderLinkStates.waiting_for_link)
+    await state.update_data(ch_id=ch_id)
+    await cb.message.edit_text(
+        "🔗 Укажи ссылку для кнопки «Заказать».\n"
+        "Можно @username или ссылку t.me/username.",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"cm:main_settings:{ch_id}")]]
+        ),
+    )
+
+
+@router.message(OrderLinkStates.waiting_for_link)
+async def cm_order_link_save(msg: Message, state: FSMContext):
+    data = await state.get_data()
+    ch_id = data.get("ch_id")
+    if not ch_id:
+        await state.clear()
+        await msg.answer("Канал не найден. Откройте меню снова.")
+        return
+    reg = _get_registry()
+    ch = reg.get(str(ch_id)) or reg.get(ch_id)
+    if not ch:
+        await state.clear()
+        await msg.answer("Канал не найден. Откройте меню снова.")
+        return
+    url = _normalize_order_url(msg.text or "")
+    if not url:
+        await msg.answer("⚠️ Ссылка пустая. Введи ещё раз.")
+        return
+    ch["order_button_url"] = url
+    ch["order_button_enabled"] = True
+    _save_registry(reg)
+    await state.clear()
+    await msg.answer("✅ Ссылка для кнопки «Заказать» сохранена.", reply_markup=_kb_main_settings(ch))
+
+
+@router.callback_query(F.data.startswith("cm:text_toggle:"))
+async def cm_toggle_text_mode(cb: CallbackQuery):
+    ch_id = cb.data.split(":")[-1]
+    _u, reg, ch = await _get_channel_for_cb(cb, ch_id)
+    if not ch:
+        return
+    ch["text_mode"] = "copy" if ch.get("text_mode") != "copy" else "normal"
+    _save_registry(reg)
+    await cm_main_settings(cb)
+
+
+@router.callback_query(F.data.startswith("cm:round_toggle:"))
+async def cm_toggle_round(cb: CallbackQuery):
+    ch_id = cb.data.split(":")[-1]
+    _u, reg, ch = await _get_channel_for_cb(cb, ch_id)
+    if not ch:
+        return
+    ch["round_prices"] = not bool(ch.get("round_prices"))
+    _save_registry(reg)
+    await cm_main_settings(cb)
+
+
+@router.callback_query(F.data.startswith("cm:markup_type:"))
+async def cm_toggle_markup_type(cb: CallbackQuery):
+    ch_id = cb.data.split(":")[-1]
+    _u, reg, ch = await _get_channel_for_cb(cb, ch_id)
+    if not ch:
+        return
+    ch["markup_type"] = "pct" if ch.get("markup_type") != "pct" else "flat"
+    _save_registry(reg)
+    await cm_pricing_settings(cb)
+
+
+@router.callback_query(F.data.startswith("cm:markup_default:"))
+async def cm_set_markup_default(cb: CallbackQuery, state: FSMContext):
+    ch_id = cb.data.split(":")[-1]
+    _u, _reg, ch = await _get_channel_for_cb(cb, ch_id)
+    if not ch:
+        return
+    await state.set_state(MarkupValueStates.waiting_for_value)
+    await state.update_data(ch_id=ch_id, mk_path=[])
+    await cb.message.edit_text(
+        "Введите наценку по умолчанию (только число).",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"cm:pricing:{ch_id}")]]
+        ),
+    )
+
+
+@router.callback_query(F.data.startswith("cm_mk_root:"))
+async def cm_mk_root(cb: CallbackQuery):
+    ch_id = cb.data.split(":")[-1]
+    await cb.answer()
+    await _render_markup_tree(cb, ch_id=ch_id, current_path=[], edit=False)
+
+
+@router.callback_query(F.data.startswith("cm_mk_open:"))
+async def cm_mk_open(cb: CallbackQuery):
+    _, _, tail = (cb.data or "").partition("cm_mk_open:")
+    try:
+        ch_id, tok = tail.split(":", 1)
+    except ValueError:
+        await cb.answer("Ошибка пути", show_alert=True)
+        return
+    raw_path = _resolve_path_token(tok, kind="mk", ch_id=ch_id)
+    if raw_path is None:
+        await _alert_stale(cb)
+        return
+    path = [p for p in raw_path.split("|") if p]
+    await cb.answer()
+    await _render_markup_tree(cb, ch_id=ch_id, current_path=path, edit=True)
+
+
+@router.callback_query(F.data.startswith("cm_mk_back:"))
+async def cm_mk_back(cb: CallbackQuery):
+    _, _, tail = (cb.data or "").partition("cm_mk_back:")
+    try:
+        ch_id, tok = tail.split(":", 1)
+    except ValueError:
+        await cb.answer()
+        return
+    raw_path = _resolve_path_token(tok, kind="mk", ch_id=ch_id)
+    if raw_path is None:
+        await _alert_stale(cb)
+        return
+    path = [p for p in raw_path.split("|") if p]
+    await cb.answer()
+    await _render_markup_tree(cb, ch_id=ch_id, current_path=path, edit=True)
+
+
+@router.callback_query(F.data.startswith("cm_mk_set:"))
+async def cm_mk_set(cb: CallbackQuery, state: FSMContext):
+    _, _, tail = (cb.data or "").partition("cm_mk_set:")
+    try:
+        ch_id, tok = tail.split(":", 1)
+    except ValueError:
+        await cb.answer("Ошибка пути", show_alert=True)
+        return
+    raw_path = _resolve_path_token(tok, kind="mk", ch_id=ch_id)
+    if raw_path is None:
+        await _alert_stale(cb)
+        return
+    path = [p for p in raw_path.split("|") if p]
+    await state.set_state(MarkupValueStates.waiting_for_value)
+    await state.update_data(ch_id=ch_id, mk_path=path)
+    await cb.message.edit_text(
+        "Введите наценку (только число).",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"cm_mk_back:{ch_id}:{tok}")]]
+        ),
+    )
+
+
+@router.callback_query(F.data.startswith("cm_mk_del:"))
+async def cm_mk_del(cb: CallbackQuery):
+    _, _, tail = (cb.data or "").partition("cm_mk_del:")
+    try:
+        ch_id, tok = tail.split(":", 1)
+    except ValueError:
+        await cb.answer("Ошибка пути", show_alert=True)
+        return
+    raw_path = _resolve_path_token(tok, kind="mk", ch_id=ch_id)
+    if raw_path is None:
+        await _alert_stale(cb)
+        return
+    path = [p for p in raw_path.split("|") if p]
+    _u, reg, ch = await _get_channel_for_cb(cb, ch_id)
+    if not ch:
+        return
+    key = _markup_key(path)
+    mv = ch.get("markup_values") or {}
+    if isinstance(mv, dict) and key in mv:
+        mv.pop(key, None)
+        ch["markup_values"] = mv
+        _save_registry(reg)
+    await cb.answer("Удалено")
+    await _render_markup_tree(cb, ch_id=ch_id, current_path=path[:-1], edit=True)
+
+
+@router.message(MarkupValueStates.waiting_for_value)
+async def cm_mk_save_value(msg: Message, state: FSMContext):
+    data = await state.get_data()
+    ch_id = data.get("ch_id")
+    path = data.get("mk_path") or []
+    if not ch_id:
+        await state.clear()
+        await msg.answer("Канал не найден. Откройте меню снова.")
+        return
+    reg = _get_registry()
+    ch = reg.get(str(ch_id)) or reg.get(ch_id)
+    if not ch:
+        await state.clear()
+        await msg.answer("Канал не найден. Откройте меню снова.")
+        return
+    raw = (msg.text or "").strip().replace(",", ".")
+    try:
+        val = float(raw)
+    except Exception:
+        await msg.answer("⚠️ Введите число.")
+        return
+    if path:
+        mv = ch.get("markup_values") or {}
+        if not isinstance(mv, dict):
+            mv = {}
+        mv[_markup_key(path)] = val
+        ch["markup_values"] = mv
+    else:
+        ch["markup_default"] = val
+    ch["pricing_custom"] = True
+    _save_registry(reg)
+    await state.clear()
+    cb_like = type("Obj", (), {})()
+    cb_like.message = msg
+    cb_like.answer = (lambda *args, **kwargs: asyncio.sleep(0))
+    cb_like.from_user = msg.from_user
+    if path:
+        await _render_markup_tree(cb_like, ch_id=str(ch_id), current_path=path, edit=False)
+    else:
+        await msg.answer("✅ Наценка по умолчанию сохранена.", reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"cm:pricing:{ch_id}")]]
+        ))
 
 
 @router.callback_query(F.data.startswith("cm:del:"))
@@ -846,10 +1411,6 @@ async def _render_images_tree_for_channel(
         return
     title = ch.get("title") or ch.get("username") or ch_id
 
-    if (ch.get("type") or "opt") == "opt":
-        await callback.answer("Картинки доступны только для розничных каналов", show_alert=True)
-        return
-
     tree = _get_catalog_tree_for_publish()
 
     if current_path:
@@ -1082,10 +1643,6 @@ async def cm_img_set(cb: CallbackQuery, state: FSMContext):
 
     path = [p for p in raw_path.split("|") if p]
 
-    if (ch.get("type") or "opt") == "opt":
-        await cb.answer("Только для розничных каналов", show_alert=True)
-        return
-
     await state.set_state(CoverImageStates.waiting_for_photo)
     await state.update_data(ch_id=ch_id, target_path=path)
 
@@ -1148,7 +1705,7 @@ async def cm_img_receive_photo(msg: Message, state: FSMContext):
         await state.clear()
         await msg.answer("Канал не найден. Откройте меню снова.")
         return
-    if u.get("role") != "admin" and not _is_owner(ch, msg.from_user.id):
+    if not _is_owner(ch, msg.from_user.id):
         await state.clear()
         await msg.answer("⛔️ Нет доступа")
         return
@@ -1279,7 +1836,7 @@ async def cm_final_save(msg: Message, state: FSMContext):
         await state.clear()
         await msg.answer("Канал не найден. Попробуйте ещё раз через меню каналов.")
         return
-    if u.get("role") != "admin" and not _is_owner(ch, msg.from_user.id):
+    if not _is_owner(ch, msg.from_user.id):
         await state.clear()
         await msg.answer("⛔️ Нет доступа")
         return
@@ -1426,7 +1983,7 @@ async def cm_hide_time_start(cb: CallbackQuery, state: FSMContext):
         "Введите время скрытия в формате HH:MM (МСК), например <code>20:00</code>.",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"cm:hide_menu:{ch_id}")]]
+            inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"cm:pub_settings:{ch_id}")]]
         ),
     )
 
@@ -1451,7 +2008,7 @@ async def cm_hide_time_save(msg: Message, state: FSMContext):
         await state.clear()
         await msg.answer("Канал не найден. Откройте меню снова.")
         return
-    if u.get("role") != "admin" and not _is_owner(ch, msg.from_user.id):
+    if not _is_owner(ch, msg.from_user.id):
         await state.clear()
         await msg.answer("⛔️ Нет доступа")
         return
@@ -1466,7 +2023,52 @@ async def cm_hide_time_save(msg: Message, state: FSMContext):
     _save_registry(reg)
     await state.clear()
     await msg.answer("✅ Время скрытия сохранено.", reply_markup=InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"cm:hide_menu:{ch_id}")]]
+        inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"cm:pub_settings:{ch_id}")]]
+    ))
+
+
+@router.callback_query(F.data.startswith("cm:pub_time:"))
+async def cm_pub_time_start(cb: CallbackQuery, state: FSMContext):
+    ch_id = cb.data.split(":")[-1]
+    _u, _reg, ch = await _get_channel_for_cb(cb, ch_id)
+    if not ch:
+        return
+    await state.set_state(PublishTimeStates.waiting_for_time)
+    await state.update_data(ch_id=ch_id)
+    await cb.message.edit_text(
+        "Введите время публикации в формате HH:MM (МСК), например <code>12:00</code>.",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"cm:pub_settings:{ch_id}")]]
+        ),
+    )
+
+
+@router.message(PublishTimeStates.waiting_for_time)
+async def cm_pub_time_save(msg: Message, state: FSMContext):
+    data = await state.get_data()
+    ch_id = data.get("ch_id")
+    if not ch_id:
+        await state.clear()
+        await msg.answer("Канал не найден. Откройте меню снова.")
+        return
+    reg = _get_registry()
+    ch = reg.get(str(ch_id)) or reg.get(ch_id)
+    if not ch:
+        await state.clear()
+        await msg.answer("Канал не найден. Откройте меню снова.")
+        return
+    text = (msg.text or "").strip()
+    m = re.fullmatch(r"([01]?\d|2[0-3]):([0-5]\d)", text)
+    if not m:
+        await msg.answer("⚠️ Неверный формат. Введите время как HH:MM (например 12:00).")
+        return
+    hh, mm = m.group(1), m.group(2)
+    ch["publish_time"] = f"{int(hh):02d}:{mm}"
+    _save_registry(reg)
+    await state.clear()
+    await msg.answer("✅ Время публикации сохранено.", reply_markup=InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"cm:pub_settings:{ch_id}")]]
     ))
 
 
@@ -1570,6 +2172,38 @@ async def schedule_daily_opt_hide(client):
                 target = _make_channel_ref(ch_id, ch)
                 await hide_opt_models(_get_client(), target, channel_mode="opt")
                 ch["last_hide_at"] = f"{today} {cur_hm}"
+                _save_registry(reg)
+            except Exception:
+                continue
+
+
+async def schedule_daily_publish(client):
+    """
+    По времени публикации (МСК) запускаем обновление цен в каналах.
+    """
+    while True:
+        now = datetime.now(MOSCOW_TZ)
+        await asyncio.sleep(30)
+
+        reg = _get_registry()
+        today = now.date().isoformat()
+        cur_hm = now.strftime("%H:%M")
+
+        for ch_id, ch in list(reg.items()):
+            try:
+                pt = (ch.get("publish_time") or "").strip()
+                if not pt or pt != cur_hm:
+                    continue
+                if ch.get("last_publish_date") == today:
+                    continue
+                target = _make_channel_ref(str(ch_id), ch)
+                mode = "opt" if ch.get("type") == "opt" else "retail"
+                await sync_channel(
+                    client,
+                    target,
+                    channel_mode=mode,
+                )
+                ch["last_publish_date"] = today
                 _save_registry(reg)
             except Exception:
                 continue

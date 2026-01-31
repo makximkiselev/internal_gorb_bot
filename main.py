@@ -36,7 +36,7 @@ from handlers import accounts, sources, monitoring, view_prices, chat_request, p
 from handlers.auto_replies import ui as auto_replies
 from handlers.auto_replies.listener import register_auto_replies
 from handlers.publishing import channel_manager_ui
-from handlers.publishing.channel_manager_ui import schedule_daily_announcements, schedule_daily_opt_hide
+from handlers.publishing.channel_manager_ui import schedule_daily_announcements, schedule_daily_opt_hide, schedule_daily_publish
 from handlers.competitors.competitor_prices import (
     competitor_prices_daily_job,
     shutdown_playwright,
@@ -959,6 +959,7 @@ def run_bot():
             channel_manager_ui.attach_telethon_client(first_client)
             asyncio.create_task(schedule_daily_announcements(first_client))
             asyncio.create_task(schedule_daily_opt_hide(first_client))
+            asyncio.create_task(schedule_daily_publish(first_client))
 
         for acc_name, client in clients.items():
             register_auto_replies(client, acc_name)

@@ -5,6 +5,7 @@ from typing import Union, Dict, Optional, Tuple, List, Any
 
 import asyncio
 import hashlib
+import html
 import json
 import re
 from pathlib import Path
@@ -25,6 +26,7 @@ from handlers.publishing.storage import (
     load_channel_menu_state,
     save_channel_menu_state,
     load_status_extra,
+    load_managed_channels,
 )
 
 
@@ -69,6 +71,13 @@ DEFAULT_PLACEHOLDER_REL = "covers/_placeholder.jpg"  # лежит рядом: ha
 
 def _log(msg: str) -> None:
     print(f"[channel_updater] {msg}")
+
+
+def _load_channel_settings(peer_id_short: str, peer_id: str) -> dict:
+    reg = load_managed_channels()
+    if not isinstance(reg, dict):
+        return {}
+    return reg.get(peer_id_short) or reg.get(peer_id) or {}
 
 
 async def _throttle(base: float = THROTTLE_SECS) -> None:
@@ -715,10 +724,11 @@ def _apply_channel_markup(base: int | float, channel_pricing: Optional[Union[str
 
     rule = (channel_pricing or {})
     mode = (rule.get("mode") or "opt").lower()
+    base_mode = (rule.get("base_mode") or "legacy").lower()
     pct = float(rule.get("pct") or 0.0)
     flat = float(rule.get("flat") or 0.0)
 
-    if mode != "absolute":
+    if base_mode != "absolute":
         if mode == "opt":
             p = p + _opt_step(p)
         else:
@@ -740,6 +750,11 @@ def _apply_channel_markup(base: int | float, channel_pricing: Optional[Union[str
         p = p * (1.0 + pct)
     if flat:
         p = p + flat
+
+    round_step = int(rule.get("round_step") or 0)
+    if round_step > 0:
+        p = int((p + round_step - 1) // round_step * round_step)
+        return int(p)
 
     return int(round(p))
 
@@ -937,7 +952,8 @@ def _render_model_body_from_prices_and_template(
             continue
 
         any_prices = True
-        adj = _apply_channel_markup(price, channel_pricing)
+        effective_pricing = _resolve_pricing_for_path(channel_pricing, prices_path)
+        adj = _apply_channel_markup(price, effective_pricing)
         out.append(f"{t} - {_fmt_price_int(adj)}")
         last_empty = False
 
@@ -949,6 +965,36 @@ def _render_model_body_from_prices_and_template(
     if not out:
         return None if wholesale else "—"
     return "\n".join(out)
+
+
+def _resolve_pricing_for_path(channel_pricing: Optional[Union[str, dict]], prices_path: List[str]) -> Optional[Union[str, dict]]:
+    if not isinstance(channel_pricing, dict):
+        return channel_pricing
+    mtype = channel_pricing.get("markup_type")
+    if mtype not in ("pct", "flat"):
+        return channel_pricing
+    overrides = channel_pricing.get("markup_overrides") or {}
+    if not isinstance(overrides, dict):
+        overrides = {}
+    val = float(channel_pricing.get("markup_default") or 0.0)
+    if prices_path:
+        parts = [str(p) for p in prices_path if p]
+        for i in range(len(parts), 0, -1):
+            key = "|".join(parts[:i])
+            if key in overrides:
+                try:
+                    val = float(overrides.get(key))
+                except Exception:
+                    pass
+                break
+    rule = dict(channel_pricing)
+    if mtype == "pct":
+        rule["pct"] = float(val) / 100.0
+        rule["flat"] = 0.0
+    else:
+        rule["flat"] = float(val)
+        rule["pct"] = 0.0
+    return rule
 
 
 # --------------------------- Brand reorder / reset logic ---------------------------
@@ -1124,6 +1170,8 @@ def _build_model_text(
     prices_path: List[str],
     template_path: Optional[List[str]],
     channel_pricing: Optional[Union[str, dict]],
+    *,
+    text_mode: str = "normal",
 ) -> Optional[str]:
     template_list = _get_template_list(template_tree, template_path)
     body = _render_model_body_from_prices_and_template(
@@ -1135,6 +1183,9 @@ def _build_model_text(
     if body is None:
         return None
     body = body or "—"
+    if text_mode == "copy":
+        safe = html.escape(f"{model}\n\n{body}")
+        return f"<code>{safe}</code>"
     return f"<b>{model}</b>\n\n{body}"
 
 
@@ -1253,6 +1304,12 @@ def _same_menu(prev_text: str, prev_fp: str, new_text: str, new_fp: str) -> bool
 def _aiogram_markup(btns: List[InlineKeyboardButton]) -> InlineKeyboardMarkup:
     rows = [[b] for b in btns]
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _append_order_button(btns: List[InlineKeyboardButton], *, enabled: bool, url: str) -> None:
+    if not enabled or not url:
+        return
+    btns.append(InlineKeyboardButton(text="🛒 Заказать", url=url))
 
 
 async def _ensure_menu_message(
@@ -1422,13 +1479,23 @@ async def _ensure_model_post(
     channel_pricing: Union[str, dict],
     cover_cfg: dict,
     peer_id_short: str,
+    images_enabled: bool,
+    text_mode: str,
 ) -> tuple[bool, Optional[int], bool]:
     prices_path, template_path = _resolve_paths_for_model(prices_tree, template_tree, cat, brand, model)
     if not prices_path:
         _log(f"⚠️ MODEL '{model}' not found in PRICES under {cat}/{brand}")
         return False, None, False
 
-    new_text = _build_model_text(prices_tree, template_tree, model, prices_path, template_path, channel_pricing)
+    new_text = _build_model_text(
+        prices_tree,
+        template_tree,
+        model,
+        prices_path,
+        template_path,
+        channel_pricing,
+        text_mode=text_mode,
+    )
 
     # Нет цен для opt → удаляем старый пост (если был)
     if not new_text:
@@ -1444,8 +1511,8 @@ async def _ensure_model_post(
         return False, None, False
 
     is_retail = _is_retail_mode(channel_pricing)
-    placeholder = _resolve_placeholder_cover(cover_cfg, peer_id_short) if (RETAIL_ALWAYS_MEDIA and is_retail) else None
-    cover_real = _resolve_model_cover(cover_cfg, peer_id_short, prices_path)
+    placeholder = _resolve_placeholder_cover(cover_cfg, peer_id_short) if images_enabled and is_retail else None
+    cover_real = _resolve_model_cover(cover_cfg, peer_id_short, prices_path) if images_enabled else None
 
     # В retail: всегда MEDIA (обложка или placeholder)
     cover = cover_real or placeholder
@@ -1588,6 +1655,8 @@ async def _ensure_group_post(
     channel_pricing: Union[str, dict],
     cover_cfg: dict,
     peer_id_short: str,
+    images_enabled: bool,
+    text_mode: str,
 ) -> tuple[bool, Optional[int], bool]:
     segment_texts: List[str] = []
     actual_models: List[str] = []
@@ -1598,7 +1667,15 @@ async def _ensure_group_post(
             _log(f"⚠️ GROUP: MODEL '{m}' not found in PRICES under {cat}/{brand}")
             continue
 
-        text = _build_model_text(prices_tree, template_tree, m, prices_path, template_path, channel_pricing)
+        text = _build_model_text(
+            prices_tree,
+            template_tree,
+            m,
+            prices_path,
+            template_path,
+            channel_pricing,
+            text_mode=text_mode,
+        )
         if text:
             segment_texts.append(text)
             actual_models.append(m)
@@ -1627,13 +1704,15 @@ async def _ensure_group_post(
             channel_pricing=channel_pricing,
             cover_cfg=cover_cfg,
             peer_id_short=peer_id_short,
+            images_enabled=images_enabled,
+            text_mode=text_mode,
         )
 
     group_text = "\n\n".join(segment_texts)
 
     # retail: групповые посты тоже держим MEDIA (placeholder)
     is_retail = _is_retail_mode(channel_pricing)
-    placeholder = _resolve_placeholder_cover(cover_cfg, peer_id_short) if (RETAIL_ALWAYS_MEDIA and is_retail) else None
+    placeholder = _resolve_placeholder_cover(cover_cfg, peer_id_short) if images_enabled and is_retail else None
     group_cover = placeholder  # для группы используем только placeholder (без попыток "угадывать" обложку)
 
     target_mid: Optional[str] = None
@@ -1784,6 +1863,8 @@ async def _ensure_unit_post(
     channel_pricing: Union[str, dict],
     cover_cfg: dict,
     peer_id_short: str,
+    images_enabled: bool,
+    text_mode: str,
 ) -> tuple[bool, Optional[int], bool]:
     """
     Публикует один unit (одна модель или группа).
@@ -1805,6 +1886,8 @@ async def _ensure_unit_post(
             channel_pricing=channel_pricing,
             cover_cfg=cover_cfg,
             peer_id_short=peer_id_short,
+            images_enabled=images_enabled,
+            text_mode=text_mode,
         )
 
     _log(f"📦 GROUP POST for models={unit} in {cat}/{brand}")
@@ -1820,6 +1903,8 @@ async def _ensure_unit_post(
         channel_pricing=channel_pricing,
         cover_cfg=cover_cfg,
         peer_id_short=peer_id_short,
+        images_enabled=images_enabled,
+        text_mode=text_mode,
     )
 
 
@@ -1859,6 +1944,7 @@ def _extract_models_from_message_text(text: str) -> list[str]:
     if not titles:
         first = _first_line(text)
         if first:
+            first = re.sub(r"<[^>]+>", "", first)
             first = re.sub(r"\s+", " ", first.strip())
             titles.append(first)
 
@@ -1978,6 +2064,21 @@ async def sync_channel(
     peer_id_short = peer_id.replace("-100", "")
     username = getattr(entity, "username", None)
 
+    # ====== channel settings (managed_channels) ======
+    ch_settings = _load_channel_settings(peer_id_short, peer_id)
+    img_flag = ch_settings.get("images_enabled") if ch_settings else None
+    images_enabled = (channel_mode == "retail") if img_flag is None else bool(img_flag)
+    text_mode = (ch_settings.get("text_mode") if ch_settings else None) or "normal"
+    round_step = 1000 if bool(ch_settings.get("round_prices")) else 0
+    order_url = (ch_settings.get("order_button_url") or "").strip() if ch_settings else ""
+    order_enabled = bool(ch_settings.get("order_button_enabled")) and bool(order_url) if ch_settings else False
+    pricing_custom = bool(ch_settings.get("pricing_custom")) if ch_settings else False
+    markup_type = (ch_settings.get("markup_type") if ch_settings else None) or "flat"
+    markup_default = float(ch_settings.get("markup_default") or 0.0) if ch_settings else 0.0
+    markup_overrides = ch_settings.get("markup_values") if ch_settings else {}
+    if not isinstance(markup_overrides, dict):
+        markup_overrides = {}
+
     # ====== cover cfg (для картинок моделей) ======
     cover_cfg = _load_cover_images_cfg()
     if cover_cfg:
@@ -2020,12 +2121,23 @@ async def sync_channel(
     channel_posts = load_channel_posts(peer_id)
     menu_state_all = load_channel_menu_state(peer_id)
 
-    # pricing cfg: ТОЛЬКО из parsed_data.json
+    # pricing cfg: ТОЛЬКО из parsed_data.json (если нет кастомной)
     pricing_cfg = _load_channel_pricing_config_from_parsed(parsed)
     channel_pricing = _resolve_channel_pricing(entity, pricing_cfg, fallback_mode=channel_mode)
+    if isinstance(channel_pricing, str):
+        channel_pricing = {"mode": channel_pricing, "pct": 0.0, "flat": 0.0}
+    if isinstance(channel_pricing, dict):
+        channel_pricing["mode"] = (channel_pricing.get("mode") or channel_mode or "opt").lower()
+        channel_pricing["round_step"] = int(round_step)
+    if pricing_custom and isinstance(channel_pricing, dict):
+        channel_pricing["base_mode"] = "absolute"
+        channel_pricing["markup_type"] = markup_type
+        channel_pricing["markup_default"] = markup_default
+        channel_pricing["markup_overrides"] = markup_overrides
+        _log("Pricing rules: custom markup enabled (absolute)")
     _log(f"Pricing rules resolved: {channel_pricing}")
 
-    if RETAIL_ALWAYS_MEDIA and _is_retail_mode(channel_pricing):
+    if images_enabled and _is_retail_mode(channel_pricing):
         ph = _resolve_placeholder_cover(cover_cfg, peer_id_short)
         _log(f"Retail MEDIA mode: placeholder={'OK' if ph else 'MISSING'}")
 
@@ -2236,6 +2348,8 @@ async def sync_channel(
                         channel_pricing=channel_pricing,
                         cover_cfg=cover_cfg,
                         peer_id_short=peer_id_short,
+                        images_enabled=images_enabled,
+                        text_mode=text_mode,
                     )
                     if changed and mid is not None:
                         edited += 1 if was_existing else 0
@@ -2259,6 +2373,8 @@ async def sync_channel(
                         channel_pricing=channel_pricing,
                         cover_cfg=cover_cfg,
                         peer_id_short=peer_id_short,
+                        images_enabled=images_enabled,
+                        text_mode=text_mode,
                     )
                     if changed and mid is not None:
                         edited += 1 if was_existing else 0
@@ -2297,6 +2413,7 @@ async def sync_channel(
                 i = j
 
             _log(f"   MENU '{cat}/{br}': models_total={len(models)} resolved_mids={resolved} buttons={len(btns)}")
+            _append_order_button(btns, enabled=order_enabled, url=order_url)
 
             title = f"📱 Модели {cat} / {br}:"
             key = f"{cat}|{br}"
@@ -2330,6 +2447,7 @@ async def sync_channel(
                 brand_links.append(InlineKeyboardButton(text=br, url=_url(mid_menu)))
 
         _log(f"  CATEGORY MENU '{cat}': brands_total={len(brands)} linked={linked} -> buttons={len(brand_links)}")
+        _append_order_button(brand_links, enabled=order_enabled, url=order_url)
 
         title = f"🏷️ Бренды в {cat}:"
         old_mid = menu_state["brands"].get(cat)
@@ -2361,6 +2479,7 @@ async def sync_channel(
             cat_btns.append(InlineKeyboardButton(text=cat, url=_url(mid_brand_menu)))
 
     _log(f"GLOBAL MENU: categories_total={len(cat_list)} linked={linked_cats} -> buttons={len(cat_btns)}")
+    _append_order_button(cat_btns, enabled=order_enabled, url=order_url)
 
     title = "🧭 Навигация по категориям:"
     old_mid = menu_state.get("categories")
